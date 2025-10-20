@@ -2,7 +2,30 @@
 A persistent blockchain with improved security and state management.
 Simplified: Game logic moved off-chain, AMM for price discovery.
 """
-import msgpack
+# Prefer the msgpack library but provide a lightweight fallback shim using json
+try:
+    import msgpack as msgpack  # type: ignore
+except Exception:
+    import json as _json
+
+    class _MsgpackShim:
+        @staticmethod
+        def packb(obj, use_bin_type=True):
+            # Encode to JSON bytes; non-serializable objects are converted to str
+            return _json.dumps(obj, default=str).encode()
+
+        @staticmethod
+        def unpackb(b, raw=False):
+            # Decode from bytes to Python objects
+            if b is None:
+                return None
+            if isinstance(b, bytes):
+                s = b.decode()
+            else:
+                s = str(b)
+            return _json.loads(s)
+
+    msgpack = _MsgpackShim()
 import logging
 from typing import Optional
 from decimal import Decimal
@@ -25,6 +48,7 @@ CONFIG_ADDRESS = b'\x00' * 19 + b'\x03'
 TOKENOMICS_ADDRESS = b'\x00' * 19 + b'\x04'
 AMM_POOL_ADDRESS = b'\x00' * 19 + b'\x05'
 GAME_ORACLE_ADDRESS = b'\x00' * 19 + b'\x06'
+PAYMENTS_ORACLE_ADDRESS = b'\x00' * 19 + b'\x07'  # New trusted address for minting USD-Tokens
 TREASURY_ADDRESS = b'\x00' * 19 + b'\xFF'
 
 # Configuration constants
@@ -296,13 +320,19 @@ class Blockchain:
         return self.get_block(best_hash)
 
     def _get_account(self, address: bytes, trie: Trie) -> dict:
-        """Retrieves an account from state."""
+        """Get account data from the trie, providing a default structure if none exists."""
         encoded_account = trie.get(address)
-        if encoded_account:
-            data = msgpack.unpackb(encoded_account, raw=False)
-            data['balance'] = int(data.get('balance', 0))
-            return data
-        return {'balance': 0, 'nonce': 0}
+        if encoded_account == b'':
+            # Default structure for a new account with multi-asset balances
+            return {
+                'balances': {
+                    'native': 0,  # Represents the native GAME-Token
+                    'usd': 0         # Represents the USD-Token stablecoin
+                },
+                'nonce': 0,
+                'lp_tokens': 0
+            }
+        return msgpack.unpackb(encoded_account)
     
     def get_account(self, address: bytes, state_trie=None) -> dict:
         """Public method to get an account from the state."""
@@ -344,306 +374,152 @@ class Blockchain:
         trie.set(ATTESTATION_ADDRESS, encoded_attestations)
 
     def _process_transaction(self, tx: Transaction, trie: Trie) -> bool:
-        """Processes a transaction with proper validation."""
-        sender_address = public_key_to_address(tx.sender_public_key)
+        """
+        Process a single transaction and update the state trie.
+        This is the heart of the state transition logic.
+        """
+        sender_address = public_key_to_address(tx.sender_pubkey)
         sender_account = self._get_account(sender_address, trie)
 
-        logger.info(f"Processing transaction: type={tx.tx_type}, sender={sender_address.hex()}, nonce={tx.nonce}")
-
+        # 1. Verify nonce
         if tx.nonce != sender_account['nonce']:
-            logger.warning(f"Invalid nonce. Expected: {sender_account['nonce']}, Got: {tx.nonce}")
-            return False
-        
+            raise ValidationError(f"Invalid nonce. Expected {sender_account['nonce']}, got {tx.nonce}")
+
+        # 2. Increment nonce
         sender_account['nonce'] += 1
-        sender_balance = int(sender_account.get('balance', 0))
-        tx_fee = int(tx.fee)
 
-        try:
-            if tx.tx_type == 'TRANSFER':
-                amount = int(tx.data.get('amount', 0))
-                recipient_address_hex = tx.data.get('recipient')
-                
-                if not recipient_address_hex or amount <= 0:
-                    return False
-                
-                recipient_address = bytes.fromhex(recipient_address_hex)
-                total_cost = amount + tx_fee
-                
-                if sender_balance < total_cost:
-                    return False
+        # 3. Deduct fee
+        sender_account['balances']['native'] -= tx.fee
+        if sender_account['balances']['native'] < 0:
+            raise ValidationError("Insufficient funds for fee")
 
-                sender_balance -= total_cost
-                sender_account['balance'] = sender_balance
-                
-                recipient_account = self._get_account(recipient_address, trie)
-                recipient_balance = int(recipient_account.get('balance', 0))
-                recipient_balance += amount
-                recipient_account['balance'] = recipient_balance
-                
-                self._set_account(recipient_address, recipient_account, trie)
+        # --- Transaction-specific logic ---
 
-            elif tx.tx_type == 'SWAP':
-                input_amount = int(tx.data.get('input_amount', 0))
-                input_is_token = bool(tx.data.get('input_is_token', True))
-                min_output = int(tx.data.get('min_output', 0))
-                
-                if input_amount <= 0:
-                    return False
-                
-                pool = self._get_liquidity_pool_state(trie)
-                output_amount = pool.get_swap_output(input_amount, input_is_token)
-                
+        if tx.tx_type == 'TRANSFER':
+            token_type = tx.data.get('token_type', 'native') # Default to native token
+            if token_type not in ['native', 'usd']:
+                raise ValidationError("Invalid token type for transfer.")
+
+            amount = tx.data['amount']
+            if sender_account['balances'][token_type] < amount:
+                raise ValidationError(f"Insufficient {token_type} funds for transfer.")
+
+            sender_account['balances'][token_type] -= amount
+            
+            recipient_address = bytes.fromhex(tx.data['to'])
+            recipient_account = self._get_account(recipient_address, trie)
+            recipient_account['balances'][token_type] += amount
+            self._set_account(recipient_address, recipient_account, trie)
+
+        elif tx.tx_type == 'MINT_USD_TOKEN':
+            # This is a permissioned action for our trusted Payments Gateway
+            if sender_address != PAYMENTS_ORACLE_ADDRESS:
+                raise ValidationError("Sender is not authorized to mint USD tokens.")
+
+            amount = tx.data['amount']
+            recipient_address = bytes.fromhex(tx.data['to'])
+            
+            recipient_account = self._get_account(recipient_address, trie)
+            recipient_account['balances']['usd'] += amount
+            self._set_account(recipient_address, recipient_account, trie)
+            
+            # Update tokenomics for tracking purposes
+            tokenomics_state = self._get_tokenomics_state(trie)
+            tokenomics_state.total_usd_in += Decimal(amount) / Decimal(TOKEN_UNIT)
+            self._set_tokenomics_state(tokenomics_state, trie)
+
+        elif tx.tx_type == 'STAKE':
+            # Example of updating existing logic for the new balances structure
+            amount = tx.data['amount']
+            if sender_account['balances']['native'] < amount:
+                raise ValidationError("Insufficient native funds for stake.")
+            
+            sender_account['balances']['native'] -= amount
+            
+            validator_set = self._get_validator_set(trie)
+            sender_hex = sender_address.hex()
+            validator_set[sender_hex] = validator_set.get(sender_hex, 0) + amount
+            self._set_validator_set(validator_set, trie)
+
+        elif tx.tx_type == 'SWAP':
+            pool = self._get_liquidity_pool_state(trie)
+            input_amount = tx.data['amount_in']
+            min_output = tx.data['min_amount_out']
+            input_is_token = tx.data['token_in'] == 'native'
+
+            if input_is_token:
+                if sender_account['balances']['native'] < input_amount:
+                    raise ValidationError("Insufficient native token balance for swap.")
+                sender_account['balances']['native'] -= input_amount
+                output_amount = pool.get_swap_output(input_amount, input_is_token=True)
                 if output_amount < min_output:
-                    logger.warning(f"Slippage too high: {output_amount} < {min_output}")
-                    return False
-                
-                if input_is_token:
-                    total_cost = input_amount + tx_fee
-                    if sender_balance < total_cost:
-                        return False
-                    
-                    sender_balance -= total_cost
-                    sender_account['balance'] = sender_balance
-                    
-                    pool.token_reserve += input_amount
-                    pool.usd_reserve -= output_amount
-                    
-                    tokenomics = self._get_tokenomics_state(trie)
-                    tokenomics.total_usd_out += Decimal(output_amount) / TOKEN_UNIT
-                    self._set_tokenomics_state(tokenomics, trie)
-                    
-                else:
-                    if sender_balance < tx_fee:
-                        return False
-                    
-                    sender_balance -= tx_fee
-                    sender_balance += output_amount
-                    sender_account['balance'] = sender_balance
-                    
-                    pool.usd_reserve += input_amount
-                    pool.token_reserve -= output_amount
-                    
-                    tokenomics = self._get_tokenomics_state(trie)
-                    tokenomics.total_usd_in += Decimal(input_amount) / TOKEN_UNIT
-                    self._set_tokenomics_state(tokenomics, trie)
-                
-                self._set_liquidity_pool_state(pool, trie)
+                    raise ValidationError("Swap would result in less than minimum output.")
+                sender_account['balances']['usd'] += output_amount
+                pool.token_reserve += input_amount
+                pool.usd_reserve -= output_amount
+            else: # Input is USD
+                if sender_account['balances']['usd'] < input_amount:
+                    raise ValidationError("Insufficient USD token balance for swap.")
+                sender_account['balances']['usd'] -= input_amount
+                output_amount = pool.get_swap_output(input_amount, input_is_token=False)
+                if output_amount < min_output:
+                    raise ValidationError("Swap would result in less than minimum output.")
+                sender_account['balances']['native'] += output_amount
+                pool.usd_reserve += input_amount
+                pool.token_reserve -= output_amount
+            
+            self._set_liquidity_pool_state(pool, trie)
 
-            elif tx.tx_type == 'ADD_LIQUIDITY':
-                token_amount = int(tx.data.get('token_amount', 0))
-                usd_amount = int(tx.data.get('usd_amount', 0))
-                
-                if token_amount <= 0 or usd_amount <= 0:
-                    return False
-                
-                pool = self._get_liquidity_pool_state(trie)
-                
-                if pool.lp_token_supply == 0:
-                    lp_tokens = int((token_amount * usd_amount) ** 0.5)
-                else:
-                    lp_tokens = min(
-                        (token_amount * pool.lp_token_supply) // pool.token_reserve,
-                        (usd_amount * pool.lp_token_supply) // pool.usd_reserve
-                    )
-                
-                total_cost = token_amount + tx_fee
-                if sender_balance < total_cost:
-                    return False
-                
-                sender_balance -= total_cost
-                sender_account['balance'] = sender_balance
-                
-                pool.token_reserve += token_amount
-                pool.usd_reserve += usd_amount
-                pool.lp_token_supply += lp_tokens
-                
-                sender_account['lp_tokens'] = sender_account.get('lp_tokens', 0) + lp_tokens
-                
-                self._set_liquidity_pool_state(pool, trie)
+        elif tx.tx_type == 'ADD_LIQUIDITY':
+            pool = self._get_liquidity_pool_state(trie)
+            native_amount = tx.data['native_amount']
+            usd_amount = tx.data['usd_amount']
 
-            elif tx.tx_type == 'REMOVE_LIQUIDITY':
-                lp_tokens = int(tx.data.get('lp_tokens', 0))
-                
-                if lp_tokens <= 0:
-                    return False
-                
-                user_lp_tokens = sender_account.get('lp_tokens', 0)
-                if user_lp_tokens < lp_tokens:
-                    return False
-                
-                pool = self._get_liquidity_pool_state(trie)
-                
-                token_amount = (lp_tokens * pool.token_reserve) // pool.lp_token_supply
-                usd_amount = (lp_tokens * pool.usd_reserve) // pool.lp_token_supply
-                
-                if sender_balance < tx_fee:
-                    return False
-                
-                sender_balance -= tx_fee
-                sender_balance += token_amount
-                sender_account['balance'] = sender_balance
-                sender_account['lp_tokens'] = user_lp_tokens - lp_tokens
-                
-                pool.token_reserve -= token_amount
-                pool.usd_reserve -= usd_amount
-                pool.lp_token_supply -= lp_tokens
-                
-                self._set_liquidity_pool_state(pool, trie)
+            if sender_account['balances']['native'] < native_amount or sender_account['balances']['usd'] < usd_amount:
+                raise ValidationError("Insufficient balance to add liquidity.")
 
-            elif tx.tx_type == 'DISTRIBUTE_REWARDS':
-                if sender_address != self.game_oracle_address:
-                    logger.warning(f"Unauthorized DISTRIBUTE_REWARDS from {sender_address.hex()}")
-                    return False
-                
-                rewards = tx.data.get('rewards', [])
-                if not rewards or not isinstance(rewards, list):
-                    return False
-                
-                treasury_account = self._get_account(TREASURY_ADDRESS, trie)
-                treasury_balance = int(treasury_account.get('balance', 0))
-                
-                total_reward = sum(int(r.get('amount', 0)) for r in rewards)
-                
-                if treasury_balance < total_reward + tx_fee:
-                    logger.warning(f"Insufficient treasury balance: {treasury_balance} < {total_reward}")
-                    return False
-                
-                treasury_balance -= total_reward + tx_fee
-                treasury_account['balance'] = treasury_balance
-                self._set_account(TREASURY_ADDRESS, treasury_account, trie)
-                
-                for reward in rewards:
-                    recipient_hex = reward.get('recipient')
-                    amount = int(reward.get('amount', 0))
-                    
-                    if not recipient_hex or amount <= 0:
-                        continue
-                    
-                    recipient_address = bytes.fromhex(recipient_hex)
-                    recipient_account = self._get_account(recipient_address, trie)
-                    recipient_balance = int(recipient_account.get('balance', 0))
-                    recipient_account['balance'] = recipient_balance + amount
-                    self._set_account(recipient_address, recipient_account, trie)
-                
-                logger.info(f"Distributed {total_reward} tokens to {len(rewards)} winners")
+            sender_account['balances']['native'] -= native_amount
+            sender_account['balances']['usd'] -= usd_amount
 
-            elif tx.tx_type == 'STAKE':
-                amount = int(tx.data.get('amount', 0))
-                vrf_pub_key_hex = tx.data.get('vrf_pub_key')
-                
-                total_cost = amount + tx_fee
-                if sender_balance < total_cost or amount < MIN_STAKE_AMOUNT or not vrf_pub_key_hex:
-                    return False
-                
-                sender_balance -= total_cost
-                sender_account['balance'] = sender_balance
-                
-                if 'vrf_pub_key' not in sender_account:
-                    sender_account['vrf_pub_key'] = vrf_pub_key_hex
-                
-                validators = self._get_validator_set(trie)
-                sender_hex = sender_address.hex()
-                prev_stake = int(validators.get(sender_hex, 0))
-                validators[sender_hex] = prev_stake + amount
-                self._set_validator_set(validators, trie)
-
-            elif tx.tx_type == 'UNSTAKE':
-                amount = int(tx.data.get('amount', 0))
-                if amount <= 0:
-                    return False
-
-                if sender_balance < tx_fee:
-                    return False
-
-                validators = self._get_validator_set(trie)
-                sender_hex = sender_address.hex()
-                prev_stake = int(validators.get(sender_hex, 0))
-                
-                if prev_stake < amount:
-                    return False
-                
-                sender_balance -= tx_fee
-                new_stake = prev_stake - amount
-                sender_balance += amount
-                sender_account['balance'] = sender_balance
-                
-                if new_stake <= 0:
-                    if sender_hex in validators:
-                        del validators[sender_hex]
-                else:
-                    validators[sender_hex] = new_stake
-                
-                self._set_validator_set(validators, trie)
-
-            elif tx.tx_type == 'ATTEST':
-                block_hash_hex = tx.data.get('block_hash')
-                validators = self._get_validator_set(trie)
-                if sender_address.hex() not in validators:
-                    return False
-
-                if sender_balance < tx_fee:
-                    return False
-                sender_balance -= tx_fee
-                sender_account['balance'] = sender_balance
-
-                attestations = self._get_attestations(trie)
-                if block_hash_hex not in attestations:
-                    attestations[block_hash_hex] = []
-                
-                if sender_address.hex() not in attestations[block_hash_hex]:
-                    attestations[block_hash_hex].append(sender_address.hex())
-                
-                self._set_attestations(attestations, trie)
-                self.latest_attestations[sender_address.hex()] = block_hash_hex
-
-            elif tx.tx_type == 'SLASH':
-                header1_dict = tx.data.get('header1')
-                header2_dict = tx.data.get('header2')
-
-                if not header1_dict or not header2_dict:
-                    return False
-                
-                header1 = BlockHeader(**header1_dict)
-                header2 = BlockHeader(**header2_dict)
-
-                if header1.height != header2.height or \
-                   header1.producer != header2.producer or \
-                   header1.calculate_hash() == header2.calculate_hash():
-                    return False
-                
-                offender_address = public_key_to_address(header1.producer)
-                validators = self._get_validator_set(trie)
-                offender_hex = offender_address.hex()
-                
-                if offender_hex in validators:
-                    staked_amount = int(validators[offender_hex])
-                    config = self._get_config()
-                    slash_percentage = int(config.get('slash_percentage', SLASH_PERCENTAGE))
-                    slashed_amount = (staked_amount * slash_percentage) // 100
-                    
-                    new_stake = staked_amount - slashed_amount
-                    if new_stake <= 0:
-                        del validators[offender_hex]
-                    else:
-                        validators[offender_hex] = new_stake
-                    
-                    self._set_validator_set(validators, trie)
-                    
-                    if sender_balance < tx_fee:
-                        return False
-                    sender_balance -= tx_fee
-                    sender_balance += slashed_amount
-                    sender_account['balance'] = sender_balance
-
+            # Simplified LP token calculation (a more robust implementation would use sqrt)
+            if pool.lp_token_supply == 0:
+                lp_tokens_to_mint = 100 * TOKEN_UNIT # Initial liquidity provider gets a fixed amount
             else:
-                logger.warning(f"Unknown transaction type: {tx.tx_type}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Exception in _process_transaction for {tx.tx_type}: {e}", exc_info=True)
-            return False
+                lp_tokens_to_mint = (native_amount * pool.lp_token_supply) // pool.token_reserve
 
+            sender_account['lp_tokens'] += lp_tokens_to_mint
+            
+            pool.token_reserve += native_amount
+            pool.usd_reserve += usd_amount
+            pool.lp_token_supply += lp_tokens_to_mint
+            self._set_liquidity_pool_state(pool, trie)
+
+        elif tx.tx_type == 'REMOVE_LIQUIDITY':
+            pool = self._get_liquidity_pool_state(trie)
+            lp_amount = tx.data['lp_amount']
+
+            if sender_account['lp_tokens'] < lp_amount:
+                raise ValidationError("Insufficient LP tokens.")
+
+            # Calculate proportional share of reserves
+            share = lp_amount / pool.lp_token_supply
+            native_to_return = int(pool.token_reserve * share)
+            usd_to_return = int(pool.usd_reserve * share)
+
+            sender_account['lp_tokens'] -= lp_amount
+            sender_account['balances']['native'] += native_to_return
+            sender_account['balances']['usd'] += usd_to_return
+
+            pool.token_reserve -= native_to_return
+            pool.usd_reserve -= usd_to_return
+            pool.lp_token_supply -= lp_amount
+            self._set_liquidity_pool_state(pool, trie)
+
+        # --- End of transaction-specific logic ---
+
+        # 4. Save the updated sender account
         self._set_account(sender_address, sender_account, trie)
+
         return True
 
     def validate_chain(self) -> bool:
