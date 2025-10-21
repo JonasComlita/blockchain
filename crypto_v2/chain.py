@@ -48,7 +48,10 @@ CONFIG_ADDRESS = b'\x00' * 19 + b'\x03'
 TOKENOMICS_ADDRESS = b'\x00' * 19 + b'\x04'
 AMM_POOL_ADDRESS = b'\x00' * 19 + b'\x05'
 GAME_ORACLE_ADDRESS = b'\x00' * 19 + b'\x06'
-PAYMENTS_ORACLE_ADDRESS = b'\x00' * 19 + b'\x07'  # New trusted address for minting USD-Tokens
+PAYMENTS_ORACLE_ADDRESS = b'\x00' * 19 + b'\x07'
+RESERVE_POOL_ADDRESS = b'\x00' * 19 + b'\x08'
+RESERVE_ADMIN_ADDRESS = b'\x00' * 19 + b'\x09'
+OUTFLOW_RESERVE_ADDRESS = b'\x00' * 19 + b'\x0A' # New address for the buyback & burn contract
 TREASURY_ADDRESS = b'\x00' * 19 + b'\xFF'
 
 # Configuration constants
@@ -58,6 +61,10 @@ MAX_BLOCK_SIZE = 1_000_000
 MAX_TXS_PER_BLOCK = 1000
 MIN_STAKE_AMOUNT = 100 * TOKEN_UNIT
 SLASH_PERCENTAGE = 50
+
+# Configuration constants for the Bonding Curve
+BONDING_CURVE_BASE_PRICE = Decimal('0.10') # $0.10
+BONDING_CURVE_SLOPE = Decimal('0.00000001')
 
 
 class ValidationError(Exception):
@@ -441,11 +448,125 @@ class Blockchain:
             validator_set[sender_hex] = validator_set.get(sender_hex, 0) + amount
             self._set_validator_set(validator_set, trie)
 
+        elif tx.tx_type == 'BOND_MINT':
+            tokenomics_state = self._get_tokenomics_state(trie)
+            usd_amount_in = tx.data['amount_in']
+
+            if sender_account['balances']['usd'] < usd_amount_in:
+                raise ValidationError("Insufficient USD balance for bond mint.")
+
+            # Calculate tokens to mint based on the bonding curve
+            # This is a simplified integration; a real one would be more complex
+            price_per_token = BONDING_CURVE_BASE_PRICE + (BONDING_CURVE_SLOPE * tokenomics_state.total_supply)
+            native_tokens_out = int(Decimal(usd_amount_in) / price_per_token)
+
+            # Transfer USD to the reserve pool
+            sender_account['balances']['usd'] -= usd_amount_in
+            reserve_pool_account = self._get_account(RESERVE_POOL_ADDRESS, trie)
+            reserve_pool_account['balances']['usd'] += usd_amount_in
+            self._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, trie)
+
+            # Mint new native tokens to the user
+            tokenomics_state.total_supply += native_tokens_out
+            sender_account['balances']['native'] += native_tokens_out
+            self._set_tokenomics_state(tokenomics_state, trie)
+
+        elif tx.tx_type == 'RESERVE_BURN':
+            native_amount_in = tx.data['amount_in']
+
+            if sender_account['balances']['native'] < native_amount_in:
+                raise ValidationError("Insufficient native token balance for reserve burn.")
+
+            # A simple reverse curve: the price offered decreases as the reserve's USD balance dwindles.
+            outflow_reserve_account = self._get_account(OUTFLOW_RESERVE_ADDRESS, trie)
+            usd_balance = outflow_reserve_account['balances']['usd']
+            
+            # For simplicity, let's say the reserve offers a price slightly below the main market price.
+            pool = self._get_liquidity_pool_state(trie)
+            market_price = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            buyback_price = market_price * Decimal('0.98') # Offer 98% of market price
+            
+            usd_tokens_out = int(Decimal(native_amount_in) * buyback_price)
+
+            if usd_balance < usd_tokens_out:
+                raise ValidationError("Outflow Reserve has insufficient USD liquidity for this sale.")
+
+            # Perform the swap
+            sender_account['balances']['native'] -= native_amount_in
+            sender_account['balances']['usd'] += usd_tokens_out
+            outflow_reserve_account['balances']['usd'] -= usd_tokens_out
+            self._set_account(OUTFLOW_RESERVE_ADDRESS, outflow_reserve_account, trie)
+
+            # Burn the received native tokens
+            tokenomics_state = self._get_tokenomics_state(trie)
+            tokenomics_state.total_supply -= native_amount_in
+            tokenomics_state.total_burned += native_amount_in
+            self._set_tokenomics_state(tokenomics_state, trie)
+
+        elif tx.tx_type == 'DEPLOY_RESERVE_LIQUIDITY':
+            if sender_address != RESERVE_ADMIN_ADDRESS:
+                raise ValidationError("Only the Reserve Admin can deploy liquidity.")
+
+            reserve_pool_account = self._get_account(RESERVE_POOL_ADDRESS, trie)
+            usd_to_deploy = reserve_pool_account['balances']['usd']
+            if usd_to_deploy == 0:
+                raise ValidationError("No USD in reserve pool to deploy.")
+
+            # For simplicity, we'll mint a corresponding amount of native tokens
+            # A real implementation might use a different strategy
+            pool = self._get_liquidity_pool_state(trie)
+            price_per_token = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            native_to_mint_and_deploy = int(Decimal(usd_to_deploy) / price_per_token)
+
+            tokenomics_state = self._get_tokenomics_state(trie)
+            tokenomics_state.total_supply += native_to_mint_and_deploy
+            self._set_tokenomics_state(tokenomics_state, trie)
+
+            # Add the new liquidity to the AMM pool
+            pool.usd_reserve += usd_to_deploy
+            pool.token_reserve += native_to_mint_and_deploy
+            # A real implementation would also mint and distribute LP tokens
+            self._set_liquidity_pool_state(pool, trie)
+
+            # Clear the reserve pool's USD balance
+            reserve_pool_account['balances']['usd'] = 0
+            self._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, trie)
+
         elif tx.tx_type == 'SWAP':
             pool = self._get_liquidity_pool_state(trie)
             input_amount = tx.data['amount_in']
             min_output = tx.data['min_amount_out']
             input_is_token = tx.data['token_in'] == 'native'
+
+            # --- NEW: WALLED GARDEN VALIDATION LOGIC ---
+
+            # Rule 1: Enforce Minimum Transaction Value ($1.00)
+            # We must use the integer representation for comparison
+            if pool.token_reserve > 0:
+                current_price_decimal = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            else:
+                current_price_decimal = Decimal(0)
+
+            if input_is_token:
+                usd_value_of_input_int = int((Decimal(input_amount) * current_price_decimal))
+            else: # Input is USD
+                usd_value_of_input_int = input_amount
+            
+            if usd_value_of_input_int < (1 * TOKEN_UNIT):
+                raise ValidationError(f"Transaction value is below the $1.00 minimum.")
+
+            # Rule 2: Enforce Maximum Transaction Size (<50% of Pool Reserve)
+            output_amount = pool.get_swap_output(input_amount, input_is_token=input_is_token)
+            
+            if input_is_token: # User is selling GAME-Token, claiming USD-Token
+                target_reserve = pool.usd_reserve
+            else: # User is buying GAME-Token, claiming GAME-Token
+                target_reserve = pool.token_reserve
+
+            if output_amount >= (target_reserve // 2): # Integer division for safety
+                raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
+
+            # --- END OF NEW VALIDATION ---
 
             if input_is_token:
                 if sender_account['balances']['native'] < input_amount:
