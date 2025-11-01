@@ -329,7 +329,7 @@ class Blockchain:
     def _get_account(self, address: bytes, trie: Trie) -> dict:
         """Get account data from the trie, providing a default structure if none exists."""
         encoded_account = trie.get(address)
-        if encoded_account == b'':
+        if encoded_account is None:
             # Default structure for a new account with multi-asset balances
             return {
                 'balances': {
@@ -385,7 +385,7 @@ class Blockchain:
         Process a single transaction and update the state trie.
         This is the heart of the state transition logic.
         """
-        sender_address = public_key_to_address(tx.sender_pubkey)
+        sender_address = public_key_to_address(tx.sender_public_key)
         sender_account = self._get_account(sender_address, trie)
 
         # 1. Verify nonce
@@ -563,6 +563,7 @@ class Blockchain:
             else: # User is buying GAME-Token, claiming GAME-Token
                 target_reserve = pool.token_reserve
 
+            output_amount = pool.get_swap_output(input_amount, input_is_token=input_is_token)
             if output_amount >= (target_reserve // 2): # Integer division for safety
                 raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
 
@@ -572,7 +573,6 @@ class Blockchain:
                 if sender_account['balances']['native'] < input_amount:
                     raise ValidationError("Insufficient native token balance for swap.")
                 sender_account['balances']['native'] -= input_amount
-                output_amount = pool.get_swap_output(input_amount, input_is_token=True)
                 if output_amount < min_output:
                     raise ValidationError("Swap would result in less than minimum output.")
                 sender_account['balances']['usd'] += output_amount
@@ -582,7 +582,6 @@ class Blockchain:
                 if sender_account['balances']['usd'] < input_amount:
                     raise ValidationError("Insufficient USD token balance for swap.")
                 sender_account['balances']['usd'] -= input_amount
-                output_amount = pool.get_swap_output(input_amount, input_is_token=False)
                 if output_amount < min_output:
                     raise ValidationError("Swap would result in less than minimum output.")
                 sender_account['balances']['native'] += output_amount

@@ -1,0 +1,284 @@
+# Blockchain Security Test Plan - Production Launch
+
+## Critical Priority Tests (Must Pass Before Launch)
+
+### 1. Consensus & State Integrity Tests
+
+#### 1.1 State Transition Validation
+- [ ] **Double-spend prevention**: Attempt to spend same tokens in parallel transactions
+- [ ] **Nonce enforcement**: Submit transactions with duplicate, skipped, or out-of-order nonces
+- [ ] **Balance underflow**: Try to transfer/stake more tokens than available
+- [ ] **State root verification**: Verify state root matches after replaying all transactions
+- [ ] **Fork choice correctness**: Test LMD GHOST with competing chains
+
+#### 1.2 AMM Pool Security
+- [ ] **Constant product invariant**: Verify x*y=k holds after all swaps
+- [ ] **Minimum transaction enforcement**: Test $1.00 minimum (both directions)
+- [ ] **Maximum size limit**: Attempt swaps >50% of pool reserves
+- [ ] **Fee calculation accuracy**: Verify 0.3% fee is correctly applied
+- [ ] **Integer overflow/underflow**: Test with extreme values
+- [ ] **Price manipulation**: Attempt sandwich attacks, front-running
+- [ ] **Liquidity removal attacks**: Try to drain pool unfairly
+
+#### 1.3 Multi-Asset Balance System
+- [ ] **Balance isolation**: Verify native/USD balances are independent
+- [ ] **Cross-asset attacks**: Try to spend USD as native tokens (and vice versa)
+- [ ] **Negative balance prevention**: Test all paths that modify balances
+- [ ] **LP token accounting**: Verify LP tokens match actual pool shares
+
+### 2. Transaction Validation Tests
+
+#### 2.1 Cryptographic Security
+- [ ] **Signature verification**: Reject invalid/missing signatures
+- [ ] **Signature malleability**: Test for signature replay attacks
+- [ ] **Public key recovery**: Verify address derivation is deterministic
+- [ ] **VRF proof validation**: Test leader election with invalid VRF proofs
+
+#### 2.2 Transaction Types
+- [ ] **TRANSFER**: Test native/USD transfers, insufficient funds, invalid recipients
+- [ ] **MINT_USD_TOKEN**: Verify only PAYMENTS_ORACLE_ADDRESS can mint
+- [ ] **STAKE**: Test minimum stake, unstaking, validator set updates
+- [ ] **BOND_MINT**: Verify bonding curve calculations, reserve pool updates
+- [ ] **RESERVE_BURN**: Test buyback price (98% of market), outflow reserve limits
+- [ ] **DEPLOY_RESERVE_LIQUIDITY**: Verify only RESERVE_ADMIN_ADDRESS can deploy
+- [ ] **SWAP**: All AMM restrictions (min/max/fees)
+- [ ] **ADD_LIQUIDITY/REMOVE_LIQUIDITY**: LP token math, proportional withdrawals
+
+#### 2.3 Permission & Authorization
+- [ ] **Oracle restrictions**: Non-oracles cannot mint USD or deploy liquidity
+- [ ] **Admin restrictions**: Non-admins cannot call admin functions
+- [ ] **Chain ID validation**: Reject transactions from wrong chain
+
+### 3. Economic Attack Vectors
+
+#### 3.1 Tokenomics Exploits
+- [ ] **Supply manipulation**: Verify total_supply = minted - burned at all times
+- [ ] **Reserve pool draining**: Attempt to extract more USD than available
+- [ ] **Bonding curve bypass**: Try to mint tokens cheaper than bonding curve
+- [ ] **Price oracle manipulation**: If using external prices, test manipulation
+
+#### 3.2 AMM Exploits
+- [ ] **Flash loan attacks**: Large swap → reverse swap in same block
+- [ ] **Slippage attacks**: Test min_amount_out protection
+- [ ] **Liquidity removal timing**: Remove liquidity right before large swaps
+- [ ] **First LP exploit**: Test initial liquidity provision edge cases
+
+### 4. Block Production & Validation
+
+#### 4.1 Block Validity
+- [ ] **Parent hash chain**: Verify parent_hash links form valid chain
+- [ ] **Block size limits**: Reject blocks >MAX_BLOCK_SIZE
+- [ ] **Transaction limits**: Reject blocks >MAX_TXS_PER_BLOCK
+- [ ] **Timestamp validation**: Block timestamp > parent timestamp
+- [ ] **PoH verification**: Verify PoH sequences are valid
+- [ ] **State root mismatch**: Reject blocks with incorrect state root
+
+#### 4.2 Leader Selection
+- [ ] **VRF determinism**: Same seed always produces same leader
+- [ ] **Stake weighting**: Verify higher stake = higher selection probability
+- [ ] **Invalid leader rejection**: Reject blocks from non-leaders
+- [ ] **No VRF key handling**: Validators without VRF can't produce blocks
+
+### 5. Database & Storage Tests
+
+#### 5.1 Trie (Merkle Patricia) Integrity
+- [ ] **Insert/retrieve consistency**: Set keys and verify retrieval
+- [ ] **Root hash determinism**: Same data = same root hash
+- [ ] **Collision resistance**: Different keys don't collide
+- [ ] **Large value handling**: Test with max-size values
+- [ ] **Concurrent access**: Multiple threads reading/writing
+
+#### 5.2 Database Operations
+- [ ] **Crash recovery**: Kill node mid-block, verify recovery
+- [ ] **Checkpoint restoration**: Restore from checkpoint, verify state
+- [ ] **Database corruption**: Detect and handle corrupted entries
+- [ ] **Storage limits**: Test behavior at disk space limits
+
+## High Priority Tests (Should Pass Before Launch)
+
+### 6. Network & P2P Tests
+
+#### 6.1 Message Security
+- [ ] **Message size limits**: Reject messages >MAX_MESSAGE_SIZE
+- [ ] **Rate limiting**: Block peers exceeding message rate
+- [ ] **Message deduplication**: Don't process duplicate blocks/txs
+- [ ] **Timestamp validation**: Reject old/future messages
+- [ ] **Malformed messages**: Handle invalid msgpack gracefully
+
+#### 6.2 Peer Management
+- [ ] **Peer banning**: Ban peers with score < -100
+- [ ] **Connection limits**: Enforce MAX_PEERS and per-IP limits
+- [ ] **Handshake enforcement**: Reject messages before handshake
+- [ ] **Unresponsive peers**: Disconnect peers after timeout
+- [ ] **Eclipse attacks**: Can't isolate node with malicious peers
+
+#### 6.3 Network Partitions
+- [ ] **Chain reorganization**: Longer chain replaces shorter
+- [ ] **Fork resolution**: LMD GHOST selects correct head
+- [ ] **Sync after partition**: Node syncs to longest chain
+- [ ] **Attestation aggregation**: Validators attest to same head
+
+### 7. Mempool Tests
+
+#### 7.1 Transaction Pool Management
+- [ ] **Nonce gaps**: Don't include txs with nonce gaps
+- [ ] **Fee prioritization**: Higher fee txs included first
+- [ ] **Replacement by fee**: Higher fee replaces lower fee
+- [ ] **Expiry**: Remove transactions after TX_EXPIRY_TIME
+- [ ] **Eviction**: Remove low-fee txs when mempool full
+- [ ] **Per-account limits**: Enforce MAX_TXS_PER_ACCOUNT
+
+#### 7.2 DOS Prevention
+- [ ] **Spam transactions**: Flood mempool with low-fee txs
+- [ ] **Large transaction data**: Submit txs with huge data fields
+- [ ] **Invalid transactions**: Submit known-invalid txs
+
+### 8. Validator Node Tests
+
+#### 8.1 Block Production
+- [ ] **Leader rotation**: Multiple validators produce blocks in order
+- [ ] **Block timing**: Blocks produced every BLOCK_TIME seconds
+- [ ] **Transaction inclusion**: Valid mempool txs get included
+- [ ] **Empty blocks**: Can produce blocks with no transactions
+
+#### 8.2 Slashing Conditions
+- [ ] **Double signing**: Detect and slash double-signing validators
+- [ ] **Invalid blocks**: Slash validators producing invalid blocks
+- [ ] **Equivocation**: Detect and punish equivocating validators
+
+## Medium Priority Tests (Performance & Scalability)
+
+### 9. Performance Tests
+
+#### 9.1 Load Testing
+- [ ] **High TPS**: Test with 100+ transactions per second
+- [ ] **Large blocks**: Blocks near MAX_BLOCK_SIZE
+- [ ] **Many validators**: Test with 100+ validators
+- [ ] **Long chains**: Validate chain with 10,000+ blocks
+- [ ] **Large state**: Trie with 100,000+ accounts
+
+#### 9.2 Resource Usage
+- [ ] **Memory leaks**: Run for 24+ hours, monitor memory
+- [ ] **Disk usage growth**: Verify reasonable database growth
+- [ ] **CPU usage**: Block validation shouldn't peg CPU
+- [ ] **Network bandwidth**: Monitor peer message overhead
+
+### 10. Integration Tests
+
+#### 10.1 End-to-End Scenarios
+- [ ] **New user onboarding**: USD mint → swap → game fee → burn
+- [ ] **Liquidity provision**: Add liquidity → swaps occur → remove liquidity
+- [ ] **Reserve pool cycle**: Bond mint → reserve deploys → users swap
+- [ ] **Token buyback**: Users sell to outflow reserve
+- [ ] **Validator lifecycle**: Stake → produce blocks → unstake
+
+#### 10.2 Multi-Node Tests
+- [ ] **3-node network**: All nodes stay in sync
+- [ ] **Network partition**: Nodes rejoin after partition
+- [ ] **New node sync**: Fresh node syncs full chain
+- [ ] **Validator set changes**: Nodes handle changing validators
+
+## Lower Priority Tests (Edge Cases & Hardening)
+
+### 11. Edge Cases
+
+- [ ] **Genesis block**: Special handling works correctly
+- [ ] **Zero balances**: Operations on accounts with 0 balance
+- [ ] **Maximum values**: Test with max uint64 values
+- [ ] **Empty pool**: AMM operations with empty reserves
+- [ ] **Single validator**: Network with only 1 validator
+- [ ] **Simultaneous blocks**: Two validators produce at same height
+
+### 12. Upgrade & Migration Tests
+
+- [ ] **Schema changes**: Can upgrade database schema
+- [ ] **Hard forks**: Can activate new rules at specific height
+- [ ] **Backward compatibility**: Old nodes can read new blocks (until fork)
+
+## Test Execution Strategy
+
+### Phase 1: Unit Tests (Week 1-2)
+- All cryptographic functions
+- Individual transaction types
+- AMM calculations
+- Trie operations
+- Mempool logic
+
+### Phase 2: Integration Tests (Week 2-3)
+- Block validation pipeline
+- State transitions
+- Multi-transaction blocks
+- Fork choice
+
+### Phase 3: Network Tests (Week 3-4)
+- 3-5 node testnet
+- Network partitions
+- Peer misbehavior
+- Sync scenarios
+
+### Phase 4: Load Testing (Week 4-5)
+- Sustained high load
+- Stress testing limits
+- Resource monitoring
+- Performance profiling
+
+### Phase 5: Security Audit (Week 5-6)
+- External audit of critical paths
+- Fuzzing all input handlers
+- Economic attack simulations
+- Formal verification (if possible)
+
+### Phase 6: Testnet (Week 6-8)
+- Public testnet with external validators
+- Bug bounty program
+- Real user testing
+- Monitor for unexpected behaviors
+
+## Critical Security Checklist
+
+Before production launch, verify:
+
+- [ ] All critical and high priority tests pass 100%
+- [ ] No known exploits or vulnerabilities
+- [ ] External security audit completed
+- [ ] Economic models validated by experts
+- [ ] Recovery procedures documented and tested
+- [ ] Monitoring and alerting in place
+- [ ] Incident response plan ready
+- [ ] Bug bounty program active
+- [ ] Circuit breakers for emergency shutdown
+- [ ] Upgrade mechanism tested
+
+## Continuous Testing (Post-Launch)
+
+- [ ] Automated test suite runs on every commit
+- [ ] Fuzzing runs continuously
+- [ ] Mainnet monitoring for anomalies
+- [ ] Regular penetration testing
+- [ ] Economic attack simulations
+- [ ] Chaos engineering (controlled failures)
+
+---
+
+## Notes
+
+**Walled Garden Restrictions**: Your system has two key protection mechanisms:
+1. $1.00 minimum transaction value
+2. 50% maximum pool impact per swap
+
+These are excellent defenses against:
+- Micro-transaction spam
+- Single-transaction pool draining
+- MEV attacks with tiny test amounts
+
+**Areas of Concern** (flagged for extra scrutiny):
+1. **Reserve Pool Deploy Logic**: Only admin can deploy, but verify math is correct
+2. **Outflow Reserve Pricing**: 98% of market price - verify this doesn't enable arbitrage
+3. **Integer Division**: All `/` operations should be checked for precision loss
+4. **Bonding Curve**: Verify BONDING_CURVE_SLOPE prevents runaway inflation
+
+**Test Data Sets**:
+- Create realistic transaction patterns (gaming app usage)
+- Adversarial patterns (attacks)
+- Edge cases (extreme values)
+- Randomized fuzzing inputs
