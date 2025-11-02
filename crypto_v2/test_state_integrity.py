@@ -37,7 +37,7 @@ def funded_account(blockchain):
     
     # Fund the account with both native and USD tokens
     account = blockchain._get_account(address, blockchain.state_trie)
-    account['balances']['native'] = 1000 * TOKEN_UNIT
+    account['balances']['native'] = (1000 * TOKEN_UNIT) + 5000 # Add extra for fees
     account['balances']['usd'] = 1000 * TOKEN_UNIT
     blockchain._set_account(address, account, blockchain.state_trie)
     
@@ -158,6 +158,10 @@ class TestDoubleSpendPrevention:
     def test_double_spend_across_blocks(self, blockchain, funded_account, second_account):
         """Cannot reuse nonce across blocks."""
         # Create and process first transaction in block 1
+        account = blockchain._get_account(funded_account['address'], blockchain.state_trie)
+        account['balances']['native'] += 5000 # Ensure enough for fee
+        blockchain._set_account(funded_account['address'], account, blockchain.state_trie)
+
         tx1 = Transaction(
             sender_public_key=funded_account['pub_key_pem'],
             tx_type='TRANSFER',
@@ -178,7 +182,7 @@ class TestDoubleSpendPrevention:
         poh.tick()
         
         from crypto_v2.trie import Trie
-        temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
+        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
         blockchain._process_transaction(tx1, temp_trie)
         
         block1 = Block(
@@ -195,6 +199,7 @@ class TestDoubleSpendPrevention:
         
         # Add block
         blockchain.add_block(block1)
+        self.state_trie = Trie(self.db, root_hash=block1.state_root)
         
         # Try to create another transaction with same nonce
         tx2 = Transaction(

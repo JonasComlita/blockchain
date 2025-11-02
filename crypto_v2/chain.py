@@ -224,6 +224,7 @@ class Blockchain:
                 self.db.put(b'head', block.hash)
                 self.head_hash = block.hash
                 
+                # Update the main state trie to the new state root upon successful validation
                 self.state_trie = Trie(self.db, root_hash=block.state_root)
                 
                 logger.info(f"Block {block.height} added successfully: {block.hash.hex()[:16]}")
@@ -388,6 +389,10 @@ class Blockchain:
         sender_address = public_key_to_address(tx.sender_public_key)
         sender_account = self._get_account(sender_address, trie)
 
+        # 0. Verify chain ID to prevent replay attacks
+        if tx.chain_id != self.chain_id:
+            raise ValidationError(f"Wrong chain ID. Expected {self.chain_id}, got {tx.chain_id}")
+
         # 1. Verify nonce
         if tx.nonce != sender_account['nonce']:
             raise ValidationError(f"Invalid nonce. Expected {sender_account['nonce']}, got {tx.nonce}")
@@ -414,9 +419,12 @@ class Blockchain:
             sender_account['balances'][token_type] -= amount
             
             recipient_address = bytes.fromhex(tx.data['to'])
-            recipient_account = self._get_account(recipient_address, trie)
-            recipient_account['balances'][token_type] += amount
-            self._set_account(recipient_address, recipient_account, trie)
+            if sender_address != recipient_address:
+                recipient_account = self._get_account(recipient_address, trie)
+                recipient_account['balances'][token_type] += amount
+                self._set_account(recipient_address, recipient_account, trie)
+            else:
+                sender_account['balances'][token_type] += amount
 
         elif tx.tx_type == 'MINT_USD_TOKEN':
             # This is a permissioned action for our trusted Payments Gateway
@@ -555,17 +563,23 @@ class Blockchain:
             if usd_value_of_input_int < (1 * TOKEN_UNIT):
                 raise ValidationError(f"Transaction value is below the $1.00 minimum.")
 
-            # Rule 2: Enforce Maximum Transaction Size (<50% of Pool Reserve)
-            output_amount = pool.get_swap_output(input_amount, input_is_token=input_is_token)
-            
-            if input_is_token: # User is selling GAME-Token, claiming USD-Token
-                target_reserve = pool.usd_reserve
-            else: # User is buying GAME-Token, claiming GAME-Token
-                target_reserve = pool.token_reserve
+            # Rule 2: Enforce Maximum Transaction Size (50% of pool)
+            if input_is_token:
+                if input_amount >= pool.token_reserve / 2:
+                    raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
+            else: # Input is USD
+                if input_amount >= pool.usd_reserve / 2:
+                    raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
 
-            output_amount = pool.get_swap_output(input_amount, input_is_token=input_is_token)
-            if output_amount >= (target_reserve // 2): # Integer division for safety
-                raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
+            # --- END: WALLED GARDEN VALIDATION LOGIC ---
+
+            # Calculate swap output
+            output_amount = pool.get_swap_output(input_amount, input_is_token)
+            if output_amount == 0:
+                raise ValidationError("Swap would result in zero output.")
+            
+            if output_amount < min_output:
+                raise ValidationError(f"Output ({output_amount}) is less than minimum output ({min_output}).")
 
             # --- END OF NEW VALIDATION ---
 

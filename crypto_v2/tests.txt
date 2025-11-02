@@ -282,3 +282,173 @@ These are excellent defenses against:
 - Adversarial patterns (attacks)
 - Edge cases (extreme values)
 - Randomized fuzzing inputs
+
+-----------------------
+
+crypto_v2/test_transaction.py ........................s.s..........ss...                                                                [100%]
+
+======================================================== 38 passed, 4 skipped in 0.48s ========================================================
+
+The four tests are being skipped because they require specific cryptographic key pairs for privileged accounts, namely the "payments oracle" and the "reserve admin."
+
+Here's a breakdown:
+
+test_oracle_can_mint_usd and test_mint_usd_updates_tokenomics: These tests require signing a transaction as the PAYMENTS_ORACLE_ADDRESS to mint new USD tokens. The tests currently generate random keys, which don't match the required oracle address, so they are skipped to avoid an authorization failure.
+
+test_deploy_requires_usd_in_reserve_pool and test_deploy_adds_to_amm_pool: These tests need to be run as the RESERVE_ADMIN_ADDRESS to deploy liquidity from the reserve pool. Similar to the oracle tests, they are skipped because the necessary admin-specific key pair is not available in the test setup.
+
+In short, these tests are for actions that only special, pre-defined accounts can perform, and the tests currently lack the credentials to act as those accounts.
+
+------------------------------
+
+jonas@fedora:~/Downloads/NetPlay-master$ PYTHONPATH=. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_state_integrity.py
+/home/jonas/Downloads/NetPlay-master/venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:207: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+=========================================== test session starts ===========================================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0
+benchmark: 5.1.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /home/jonas/Downloads/NetPlay-master
+plugins: cov-6.0.0, benchmark-5.1.0, asyncio-0.25.3
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
+collected 16 items                                                                                        
+
+crypto_v2/test_state_integrity.py ..F.............                                                  [100%]
+
+================================================ FAILURES =================================================
+________________________ TestDoubleSpendPrevention.test_double_spend_across_blocks ________________________
+
+self = <test_state_integrity.TestDoubleSpendPrevention object at 0x7f65afba5cd0>
+blockchain = <crypto_v2.chain.Blockchain object at 0x7f65afae91d0>
+funded_account = {'address': b'#|\x08\xb0\xf5H*\x101~4\x9ej\xdd\xac&\xb2e\x91x', 'priv_key': <cryptography.hazmat.bindings._rust.openss...gWj5QHpOJBSp2U2zicUtmaeX8mX\n5HdOrOqcftjJ2Dgq0+DDMeUYrKezqA5ounx132rl+rKUdDu3mjPiHddGmA==\n-----END PUBLIC KEY-----\n'}
+second_account = {'address': b'k|\x99`d\xc2\xa5%\xf3\xad`\x99rI+;\xb52\xfc!', 'priv_key': <cryptography.hazmat.bindings._rust.openssl.e...jPpA6J2wL4tUrRbBOKm7MLSNRET\nFzicEwicLqyWm1YF9qgTbk7cvdGS4l9nBJoQD3ksk+7ax9FSA6kEoT2BfQ==\n-----END PUBLIC KEY-----\n'}
+
+    def test_double_spend_across_blocks(self, blockchain, funded_account, second_account):
+        """Cannot reuse nonce across blocks."""
+        # Create and process first transaction in block 1
+        account = blockchain._get_account(funded_account['address'], blockchain.state_trie)
+        account['balances']['native'] += 5000 # Ensure enough for fee
+        blockchain._set_account(funded_account['address'], account, blockchain.state_trie)
+    
+        tx1 = Transaction(
+            sender_public_key=funded_account['pub_key_pem'],
+            tx_type='TRANSFER',
+            data={
+                'to': second_account['address'].hex(),
+                'amount': 100 * TOKEN_UNIT,
+                'token_type': 'native'
+            },
+            nonce=0,
+            fee=1000,
+            chain_id=1
+        )
+        tx1.sign(funded_account['priv_key'])
+    
+        # Create block with tx1
+        latest = blockchain.get_latest_block()
+        poh = PoHRecorder(latest.hash)
+        poh.tick()
+    
+        from crypto_v2.trie import Trie
+        temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
+>       blockchain._process_transaction(tx1, temp_trie)
+
+crypto_v2/test_state_integrity.py:186: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+
+self = <crypto_v2.chain.Blockchain object at 0x7f65afae91d0>
+tx = <crypto_v2.core.Transaction object at 0x7f65b17dad70>
+trie = <crypto_v2.trie.Trie object at 0x7f65afbcfe30>
+
+    def _process_transaction(self, tx: Transaction, trie: Trie) -> bool:
+        """
+        Process a single transaction and update the state trie.
+        This is the heart of the state transition logic.
+        """
+        sender_address = public_key_to_address(tx.sender_public_key)
+        sender_account = self._get_account(sender_address, trie)
+    
+        # 0. Verify chain ID to prevent replay attacks
+        if tx.chain_id != self.chain_id:
+            raise ValidationError(f"Wrong chain ID. Expected {self.chain_id}, got {tx.chain_id}")
+    
+        # 1. Verify nonce
+        if tx.nonce != sender_account['nonce']:
+            raise ValidationError(f"Invalid nonce. Expected {sender_account['nonce']}, got {tx.nonce}")
+    
+        # 2. Increment nonce
+        sender_account['nonce'] += 1
+    
+        # 3. Deduct fee
+        sender_account['balances']['native'] -= tx.fee
+        if sender_account['balances']['native'] < 0:
+>           raise ValidationError("Insufficient funds for fee")
+E           crypto_v2.chain.ValidationError: Insufficient funds for fee
+
+crypto_v2/chain.py:406: ValidationError
+========================================= short test summary info =========================================
+FAILED crypto_v2/test_state_integrity.py::TestDoubleSpendPrevention::test_double_spend_across_blocks - crypto_v2.chain.ValidationError: Insufficient funds for fee
+====================================== 1 failed, 15 passed in 0.29s =======================================
+jonas@fedora:~/Downloads/NetPlay-master$ PYTHONPATH=. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_cryptographic_security.py
+/home/jonas/Downloads/NetPlay-master/venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:207: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
+The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+
+  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
+=========================================== test session starts ===========================================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0
+benchmark: 5.1.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
+rootdir: /home/jonas/Downloads/NetPlay-master
+plugins: cov-6.0.0, benchmark-5.1.0, asyncio-0.25.3
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
+collected 53 items                                                                                        
+
+crypto_v2/test_cryptographic_security.py ................F....................................      [100%]
+
+================================================ FAILURES =================================================
+__________________________ TestBlockSignatures.test_tampered_transactions_fails ___________________________
+
+self = <test_cryptographic_security.TestBlockSignatures object at 0x7f3696ada060>
+blockchain = <crypto_v2.chain.Blockchain object at 0x7f36969e20d0>
+keypair = {'address': b'\x10$\x85\xfe\xce\xcc\x15\xd1\xf5;\xc4\xc2\xb0\xf7:4C\xdd\x8a\t', 'priv_key': <cryptography.hazmat.bindi...w0DMlo4bSTlwgDoa+i51aqXjXIk\nxc6LK1Ykix8BX7WgEqAvjADyhCw3YHQypsdzqRAzxq7I2bEv1ZIvMd1aZA==\n-----END PUBLIC KEY-----\n'}
+
+    def test_tampered_transactions_fails(self, blockchain, keypair):
+        """Tampering with transactions invalidates block signature."""
+        latest = blockchain.get_latest_block()
+        poh = PoHRecorder(latest.hash)
+        poh.tick()
+    
+        block = Block(
+            parent_hash=latest.hash,
+            state_root=latest.state_root,
+            transactions=[],
+            poh_sequence=poh.sequence,
+            height=latest.height + 1,
+            producer=keypair['pub_key_pem'],
+            vrf_proof=b'test_proof',
+            timestamp=time.time()
+        )
+    
+        block.sign_block(keypair['priv_key'])
+    
+        # Add transaction after signing
+        fake_tx = Transaction(
+            sender_public_key=keypair['pub_key_pem'],
+            tx_type='TRANSFER',
+            data={'to': 'abc', 'amount': 100, 'token_type': 'native'},
+            nonce=0,
+            fee=1000,
+            chain_id=1
+        )
+        block.transactions = block.transactions + [fake_tx]
+    
+        # Signature should fail (transactions root changed)
+>       assert not block.verify_signature()
+E       assert not True
+E        +  where True = verify_signature()
+E        +    where verify_signature = <crypto_v2.core.Block object at 0x7f3696b02b70>.verify_signature
+
+crypto_v2/test_cryptographic_security.py:321: AssertionError
+========================================= short test summary info =========================================
+FAILED crypto_v2/test_cryptographic_security.py::TestBlockSignatures::test_tampered_transactions_fails - assert not True
+====================================== 1 failed, 52 passed in 0.26s =======================================

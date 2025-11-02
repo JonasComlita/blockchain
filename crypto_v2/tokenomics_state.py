@@ -30,6 +30,7 @@ class TokenomicsState:
         
         self.total_minted = int(data['total_minted'])
         self.total_burned = int(data['total_burned'])
+        self.total_supply = int(data.get('total_supply', 0))
         self.total_usd_in = Decimal(data['total_usd_in'])
         self.total_usd_out = Decimal(data['total_usd_out'])
     
@@ -40,6 +41,7 @@ class TokenomicsState:
         return {
             'total_minted': self.total_minted,
             'total_burned': self.total_burned,
+            'total_supply': self.total_supply,
             'total_usd_in': str(self.total_usd_in),
             'total_usd_out': str(self.total_usd_out),
         }

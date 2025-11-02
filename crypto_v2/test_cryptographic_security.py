@@ -315,7 +315,7 @@ class TestBlockSignatures:
             fee=1000,
             chain_id=1
         )
-        block.transactions.append(fake_tx)
+        block.transactions = block.transactions + [fake_tx]
         
         # Signature should fail (transactions root changed)
         assert not block.verify_signature()
@@ -400,7 +400,7 @@ class TestVRFProofs:
     def test_vrf_invalid_proof_fails(self, vrf_keypair):
         """Invalid VRF proofs fail verification."""
         seed = b"test_seed"
-        invalid_proof = b"invalid_proof_bytes"
+        invalid_proof = b"\x00" * 64  # Correct length, but invalid content
         
         verified_output = vrf_verify(vrf_keypair['verify_key'], seed, invalid_proof)
         

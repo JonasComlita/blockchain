@@ -739,7 +739,7 @@ class TestEdgeCasesAndBoundaries:
         # Basic validation may reject this
         is_valid, error = tx.validate_basic()
         if not is_valid:
-            assert "positive" in error.lower()
+            assert "must be positive" in error.lower()
     
     def test_maximum_amount_transfer(self, blockchain, funded_account, second_account):
         """Transferring maximum amount."""

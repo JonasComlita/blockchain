@@ -23,16 +23,17 @@ def vrf_prove(signing_key: nacl.signing.SigningKey, seed: bytes) -> tuple[bytes,
     In a real VRF, the output and proof are distinct. Here, they are the same.
     """
     signed_message = signing_key.sign(seed)
-    return signed_message.signature, signed_message.signature
+    return signed_message.signature, generate_hash(signed_message.signature)
 
-def vrf_verify(verify_key: nacl.signing.VerifyKey, seed: bytes, proof: bytes) -> bytes | None:
-    """
-    Verifies the proof and returns the random number (the signature) if valid.
-    """
+def vrf_verify(verify_key, seed, proof):
+    """Verify a VRF proof."""
     try:
+        # This will raise an exception if verification fails
         verify_key.verify(seed, proof)
-        return proof
-    except nacl.exceptions.BadSignatureError:
+        # If it passes, we derive the output hash
+        return generate_hash(proof)
+    except (nacl.exceptions.BadSignatureError, ValueError):
+        # Catch both cryptographic failures and format/length errors
         return None
 
 def generate_hash(data: bytes) -> bytes:
