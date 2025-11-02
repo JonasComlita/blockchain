@@ -8,8 +8,12 @@ import time
 import logging
 from collections import defaultdict, deque
 from typing import Optional
+import kademlia
+import miniupnpc
 from crypto_v2.core import Block, Transaction
 from crypto_v2.mempool import Mempool
+from crypto_v2.poh import PoHGenerator
+from crypto_v2.producer import BlockProducer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,6 +28,10 @@ MSG_GET_CHECKPOINT = 'get_checkpoint'
 MSG_CHECKPOINT = 'checkpoint'
 MSG_PING = 'ping'
 MSG_PONG = 'pong'
+MSG_GET_PEERS = 'get_peers'
+MSG_PEERS = 'peers'
+MSG_REQUEST_PUNCH = 'request_punch'
+MSG_PUNCH = 'punch'
 
 # Network configuration
 MAX_MESSAGE_SIZE = 10_000_000  # 10MB
@@ -57,22 +65,22 @@ def create_message(msg_type: str, data: any) -> bytes:
 
 
 class RateLimiter:
-    """Token bucket rate limiter."""
-    def __init__(self, max_rate: int, window: int):
-        self.max_rate = max_rate
-        self.window = window
-        self.timestamps = deque()
-    
+    """Leaky bucket rate limiter."""
+    def __init__(self, capacity: int, leak_rate: float):
+        self.capacity = capacity
+        self.leak_rate = leak_rate
+        self.level = 0
+        self.last_leak = time.time()
+
     def allow(self) -> bool:
         """Check if action is allowed under rate limit."""
         now = time.time()
-        
-        # Remove old timestamps
-        while self.timestamps and self.timestamps[0] < now - self.window:
-            self.timestamps.popleft()
-        
-        if len(self.timestamps) < self.max_rate:
-            self.timestamps.append(now)
+        leaked = (now - self.last_leak) * self.leak_rate
+        self.level = max(0, self.level - leaked)
+        self.last_leak = now
+
+        if self.level < self.capacity:
+            self.level += 1
             return True
         
         return False
@@ -88,30 +96,39 @@ class Peer:
         self.peer_addr = writer.get_extra_info('peername')
         self.peer_addr_str = f"{self.peer_addr[0]}:{self.peer_addr[1]}"
         self.score = 0
-        self.rate_limiter = RateLimiter(MAX_MESSAGES_PER_WINDOW, RATE_LIMIT_WINDOW)
+        self.rate_limiter = RateLimiter(MAX_MESSAGES_PER_WINDOW, MAX_MESSAGES_PER_WINDOW / RATE_LIMIT_WINDOW)
         self.last_seen = time.time()
         self.version = None
         self.handshake_complete = False
         self.sent_messages = 0
         self.received_messages = 0
 
-    def update_score(self, delta: int):
+    def update_score(self, delta: int, reason: str = ""):
         """Update peer reputation score."""
         self.score += delta
         self.score = max(-1000, min(1000, self.score))  # Clamp between -1000 and 1000
+        logger.debug(f"Score for {self.peer_addr_str} updated by {delta} to {self.score}. Reason: {reason}")
+
+    def decay_score(self):
+        """Decay score over time."""
+        if self.score > 0:
+            self.score = max(0, self.score - 1)
+        elif self.score < 0:
+            self.score = min(0, self.score + 1)
 
     def is_good(self) -> bool:
         """Check if peer has good reputation."""
-        return self.score > -100
+        return self.score > -500
 
 
 class P2PNode:
-    def __init__(self, host: str, port: int, blockchain, 
+    def __init__(self, host: str, port: int, blockchain, key_pair,
                  initial_peers: list[tuple[str, int]] = None,
                  max_peers: int = MAX_PEERS):
         self.host = host
         self.port = port
         self.blockchain = blockchain
+        self.key_pair = key_pair
         self.initial_peers = initial_peers or []
         self.max_peers = max_peers
         
@@ -132,6 +149,39 @@ class P2PNode:
         # Background tasks
         self.tasks = []
         self.running = False
+        
+        # PoH and Block Production
+        self.poh_generator = PoHGenerator(self.blockchain.get_latest_block().hash)
+        self.block_producer = BlockProducer(self.blockchain, self.mempool, self.poh_generator, self.key_pair)
+        
+        # DHT for peer discovery
+        self.dht = kademlia.network.Server()
+        self.dht_port = port + 1  # Run DHT on a separate port
+        
+    async def start_dht(self):
+        """Starts the DHT server."""
+        await self.dht.listen(self.dht_port)
+        bootstrap_nodes = [(p[0], p[1] + 1) for p in self.initial_peers]
+        await self.dht.bootstrap(bootstrap_nodes)
+        await self.dht.set(f"{self.host}:{self.port}", f"{self.host}:{self.port}")
+
+    async def _discover_peers(self):
+        """Periodically discover new peers from the DHT."""
+        while self.running:
+            await asyncio.sleep(PEER_DISCOVERY_INTERVAL)
+            
+            if len(self.peers) < self.max_peers:
+                # Get a list of all peers in the DHT
+                all_peers = await self.dht.get_all_peers()
+                for peer in all_peers:
+                    host, port_str = peer.split(':')
+                    port = int(port_str)
+                    
+                    if host != self.host or port != self.port:
+                        await self.connect_to_peer(host, port)
+                        
+                    if len(self.peers) >= self.max_peers:
+                        break
 
     async def _safe_drain(self, writer):
         """Safely drain a writer, handling both real and mock objects."""
@@ -402,6 +452,10 @@ class P2PNode:
                 return await self._handle_new_block(data, peer)
             elif msg_type == MSG_NEW_TX:
                 return await self._handle_new_tx(data, peer)
+            elif msg_type == MSG_REQUEST_PUNCH:
+                return await self._handle_request_punch(data, peer)
+            elif msg_type == MSG_PUNCH:
+                return await self._handle_punch(data, peer)
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
                 return False
@@ -409,6 +463,74 @@ class P2PNode:
         except Exception as e:
             logger.error(f"Error handling {msg_type}: {e}")
             return False
+
+    async def request_connection(self, target_host: str, target_port: int):
+        """Request a connection to a peer, using a relay if necessary."""
+        # First, try to connect directly
+        if await self.connect_to_peer(target_host, target_port):
+            return
+
+        # If direct connection fails, try to find a relay
+        for peer in self.peers.values():
+            if peer.is_good():
+                logger.info(f"Requesting relay from {peer.peer_addr_str} to {target_host}:{target_port}")
+                msg = create_message(MSG_REQUEST_PUNCH, {'target_peer': f"{target_host}:{target_port}"})
+                peer.writer.write(msg)
+                await self._safe_drain(peer.writer)
+                return
+
+        logger.error(f"Could not find a relay to connect to {target_host}:{target_port}")
+
+    async def _handle_request_punch(self, data: dict, peer: Peer) -> bool:
+        """Handle a request to punch a hole in the NAT, acting as a relay."""
+        target_addr_str = data.get('target_peer')
+        if not target_addr_str:
+            return False
+
+        logger.info(f"Relay request from {peer.peer_addr_str} to {target_addr_str}")
+
+        # Find the target peer in our connections
+        target_peer = None
+        for p in self.peers.values():
+            if p.peer_addr_str == target_addr_str:
+                target_peer = p
+                break
+        
+        if not target_peer:
+            logger.warning(f"Target peer {target_addr_str} not connected to this relay.")
+            return False
+
+        # Tell the target to connect to the initiator
+        punch_to_target_msg = create_message(MSG_PUNCH, {'target_peer': peer.peer_addr_str})
+        target_peer.writer.write(punch_to_target_msg)
+        await self._safe_drain(target_peer.writer)
+
+        # Tell the initiator to connect to the target
+        punch_to_initiator_msg = create_message(MSG_PUNCH, {'target_peer': target_peer.peer_addr_str})
+        peer.writer.write(punch_to_initiator_msg)
+        await self._safe_drain(peer.writer)
+
+        return True
+
+    async def _handle_punch(self, data: dict, peer: Peer) -> bool:
+        """Handle a punch message from a relay, instructing us to connect."""
+        target_addr_str = data.get('target_peer')
+        if not target_addr_str:
+            return False
+
+        try:
+            host, port_str = target_addr_str.split(':')
+            port = int(port_str)
+        except ValueError:
+            logger.warning(f"Invalid target address in PUNCH message: {target_addr_str}")
+            return False
+
+        logger.info(f"Received PUNCH instruction from {peer.peer_addr_str}, attempting to connect to {host}:{port}")
+        
+        # Attempt connection in a new task to not block the message loop
+        asyncio.create_task(self.connect_to_peer(host, port))
+        
+        return True
 
     async def _handle_handshake(self, data: dict, peer: Peer) -> bool:
         """Handle handshake message."""
@@ -580,32 +702,6 @@ class P2PNode:
             for peer in disconnected:
                 await self._disconnect_peer(peer)
 
-    async def _maintain_connections(self):
-        """Maintain desired number of peer connections."""
-        while self.running:
-            await asyncio.sleep(PEER_DISCOVERY_INTERVAL)
-            
-            active_peers = len([p for p in self.peers.values() if p.handshake_complete])
-            
-            if active_peers < self.max_peers // 2:
-                logger.info(f"Only {active_peers} peers, attempting to connect to more")
-                
-                # Try to connect to initial peers
-                for host, port in self.initial_peers:
-                    if active_peers >= self.max_peers:
-                        break
-                    
-                    # Check if not already connected
-                    already_connected = any(
-                        p.peer_addr[0] == host and p.peer_addr[1] == port
-                        for p in self.peers.values()
-                    )
-                    
-                    if not already_connected:
-                        success = await self.connect_to_peer(host, port)
-                        if success:
-                            active_peers += 1
-
     async def _cleanup_old_messages(self):
         """Periodically clean up old message hashes."""
         while self.running:
@@ -634,6 +730,28 @@ class P2PNode:
             # Clean expired transactions from mempool
             self.mempool.clean_expired()
 
+    async def _decay_peer_scores(self):
+        """Periodically decay peer scores."""
+        while self.running:
+            await asyncio.sleep(300)  # Decay scores every 5 minutes
+            
+            for peer in self.peers.values():
+                peer.decay_score()
+
+    async def _setup_port_forwarding(self):
+        """Attempt to set up port forwarding using UPnP."""
+        try:
+            u = miniupnpc.UPnP()
+            u.discoverdelay = 200
+            u.discover()
+            u.selectigd()
+            
+            # Add port mapping
+            u.addportmapping(self.port, 'TCP', u.lanaddr, self.port, 'NetPlay Node', '')
+            logger.info(f"Successfully set up UPnP port forwarding for port {self.port}")
+        except Exception as e:
+            logger.warning(f"Failed to set up UPnP port forwarding: {e}")
+
     async def start(self):
         """Starts the P2P node."""
         self.running = True
@@ -645,6 +763,12 @@ class P2PNode:
         addr = server.sockets[0].getsockname()
         logger.info(f'P2P node serving on {addr}')
 
+        # Set up port forwarding
+        await self._setup_port_forwarding()
+
+        # Start DHT
+        await self.start_dht()
+
         # Connect to initial peers
         for peer_host, peer_port in self.initial_peers:
             if peer_host != self.host or peer_port != self.port:
@@ -653,9 +777,14 @@ class P2PNode:
         # Start background tasks
         self.tasks = [
             asyncio.create_task(self._ping_peers()),
-            asyncio.create_task(self._maintain_connections()),
+            asyncio.create_task(self._discover_peers()),
             asyncio.create_task(self._cleanup_old_messages()),
+            asyncio.create_task(self._decay_peer_scores()),
         ]
+
+        # Start PoH and Block Production
+        self.poh_generator.start()
+        self.block_producer.start()
 
         try:
             async with server:
@@ -671,6 +800,12 @@ class P2PNode:
         # Cancel background tasks
         for task in self.tasks:
             task.cancel()
+        
+        # Stop PoH and Block Production
+        self.poh_generator.stop()
+        self.block_producer.stop()
+        self.poh_generator.join()
+        self.block_producer.join()
         
         # Disconnect all peers
         peers_copy = list(self.peers.values())

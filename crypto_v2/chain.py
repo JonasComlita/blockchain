@@ -31,12 +31,13 @@ import time
 import json
 from typing import Optional
 from decimal import Decimal
+from collections import defaultdict
 from crypto_v2.core import Block, Transaction, BlockHeader
 from crypto_v2.db import DB
-from crypto_v2.crypto import generate_hash, public_key_to_address, verify_signature
+from crypto_v2.crypto import generate_hash, public_key_to_address, verify_signature, sign
 from crypto_v2.trie import Trie, BLANK_ROOT
 from crypto_v2.poh import PoHRecorder, verify_poh_sequence
-from crypto_v2.consensus import is_valid_leader
+from crypto_v2.consensus import LeaderScheduler, is_valid_leader
 from crypto_v2.tokenomics_state import TokenomicsState
 from crypto_v2.amm_state import LiquidityPoolState
 from .monitoring import Monitor
@@ -55,6 +56,7 @@ PAYMENTS_ORACLE_ADDRESS = b'\x00' * 19 + b'\x07'
 RESERVE_POOL_ADDRESS = b'\x00' * 19 + b'\x08'
 RESERVE_ADMIN_ADDRESS = b'\x00' * 19 + b'\x09'
 OUTFLOW_RESERVE_ADDRESS = b'\x00' * 19 + b'\x0A' # New address for the buyback & burn contract
+FINALITY_STATE_ADDRESS = b'\x00' * 19 + b'\x0B'
 PAUSE_ADMIN_ADDRESS = bytes([0x00]*19 + [0x12])
 TREASURY_ADDRESS = b'\x00' * 19 + b'\xFF'
 
@@ -81,6 +83,12 @@ SLASH_PERCENTAGE = 50
 # Configuration constants for the Bonding Curve
 BONDING_CURVE_BASE_PRICE = Decimal('0.10') # $0.10
 BONDING_CURVE_SLOPE = Decimal('0.00000001')
+
+# --- Casper FFG Finality Constants ---
+EPOCH_LENGTH = 50  # blocks
+FINALITY_THRESHOLD = 2/3  # 2/3 of validators must attest
+SLASH_AMOUNT = 1000 * TOKEN_UNIT
+INACTIVITY_PENALTY = 1 * TOKEN_UNIT
 
 
 class ValidationError(Exception):
@@ -114,6 +122,62 @@ class OracleRound:
         return r
 
 
+class FinalityState:
+    """Represents the finality state of the blockchain."""
+    def __init__(self, justified_epoch, finalized_epoch):
+        self.justified_epoch = justified_epoch
+        self.finalized_epoch = finalized_epoch
+
+    def to_dict(self):
+        return {
+            "justified_epoch": self.justified_epoch,
+            "finalized_epoch": self.finalized_epoch,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        return FinalityState(d["justified_epoch"], d["finalized_epoch"])
+
+
+class Attestation:
+    """Represents a validator's vote for a checkpoint."""
+    def __init__(self, source_epoch, target_epoch, target_hash, validator_pubkey, signature=None):
+        self.source_epoch = source_epoch
+        self.target_epoch = target_epoch
+        self.target_hash = target_hash
+        self.validator_pubkey = validator_pubkey
+        self.signature = signature
+
+    def to_dict(self, include_signature=True):
+        data = {
+            "source_epoch": self.source_epoch,
+            "target_epoch": self.target_epoch,
+            "target_hash": self.target_hash.hex(),
+            "validator_pubkey": self.validator_pubkey.hex(),
+        }
+        if include_signature and self.signature:
+            data["signature"] = self.signature.hex()
+        return data
+
+    def get_signing_data(self) -> bytes:
+        """Returns the canonical byte representation for signing."""
+        return msgpack.packb(self.to_dict(include_signature=False), use_bin_type=True)
+
+    def sign(self, private_key):
+        """Signs the attestation."""
+        self.signature = sign(private_key, self.get_signing_data())
+
+    def verify_signature(self):
+        """Verifies the attestation's signature."""
+        if not self.signature:
+            return False
+        return verify_signature(
+            self.validator_pubkey,
+            self.signature,
+            self.get_signing_data()
+        )
+
+
 class Blockchain:
     def __init__(self, db_path: str = None, db: DB = None, genesis_block: Block = None, 
                  chain_id: int = 1, game_oracle_pubkey: bytes = None):
@@ -143,6 +207,7 @@ class Blockchain:
             self.head_hash = head_hash
         
         self.latest_attestations = {}
+        self.finality_state = self._get_finality_state(self.state_trie)
         
         self.oracle_rounds        = {}   # round_id -> OracleRound
         self.current_oracle_round = 1
@@ -154,6 +219,8 @@ class Blockchain:
         
         latest_block = self.get_latest_block()
         self.state_trie = Trie(self.db, root_hash=latest_block.state_root)
+        
+        self.leader_scheduler = LeaderScheduler(self._get_validator_set(self.state_trie))
         
         self._initialize_config()
 
@@ -276,9 +343,15 @@ class Blockchain:
             
             # Producer Validation
             validators = self._get_validator_set(temp_trie)
-            producer_addr = public_key_to_address(block.producer)
-            if producer_addr.hex() not in validators:
-                raise ValidationError("Producer is not a validator")
+            if not is_valid_leader(
+                producer_pubkey_hex=block.producer_pubkey,
+                vrf_proof=block.vrf_proof,
+                validators=validators,
+                seed=parent.hash,
+                vrf_pub_key_hex=block.vrf_pub_key,
+                producer_address_hex=public_key_to_address(bytes.fromhex(block.producer_pubkey)).hex()
+            ):
+                raise ValidationError("Invalid block producer")
 
             total_fees = 0
             # Optimization: If state root matches, we can skip re-processing
@@ -300,6 +373,10 @@ class Blockchain:
                         f"State root mismatch. Expected: {temp_trie.root_hash.hex()}, "
                         f"Got: {block.state_root.hex()}"
                     )
+                
+                # Process attestations
+                for attestation in block.attestations:
+                    self._process_attestation(attestation, temp_trie)
             else:
                 for tx in block.transactions:
                     total_fees += tx.fee
@@ -412,6 +489,18 @@ class Blockchain:
         encoded_attestations = msgpack.packb(attestations, use_bin_type=True)
         trie.set(ATTESTATION_ADDRESS, encoded_attestations)
 
+    def _get_finality_state(self, trie: Trie) -> 'FinalityState':
+        """Retrieves finality state."""
+        encoded = trie.get(FINALITY_STATE_ADDRESS)
+        if encoded:
+            return FinalityState.from_dict(msgpack.unpackb(encoded, raw=False))
+        return FinalityState(0, 0)
+
+    def _set_finality_state(self, state: 'FinalityState', trie: Trie):
+        """Sets finality state."""
+        encoded = msgpack.packb(state.to_dict(), use_bin_type=True)
+        trie.set(FINALITY_STATE_ADDRESS, encoded)
+
     def _get_oracle_round(self, round_id, trie):
         key = b"ORACLE_ROUND:" + str(round_id).encode()
         raw = trie.get(key)
@@ -491,17 +580,10 @@ class Blockchain:
             self._set_tokenomics_state(tokenomics_state, trie)
 
         elif tx.tx_type == 'STAKE':
-            # Example of updating existing logic for the new balances structure
-            amount = tx.data['amount']
-            if sender_account['balances']['native'] < amount:
-                raise ValidationError("Insufficient native funds for stake.")
-            
-            sender_account['balances']['native'] -= amount
-            
-            validator_set = self._get_validator_set(trie)
-            sender_hex = sender_address.hex()
-            validator_set[sender_hex] = validator_set.get(sender_hex, 0) + amount
-            self._set_validator_set(validator_set, trie)
+            self._process_stake(tx, trie, sender_address, sender_account)
+
+        elif tx.tx_type == 'UNSTAKE':
+            self._process_unstake(tx, trie, sender_address, sender_account)
 
         elif tx.tx_type == 'BOND_MINT':
             tokenomics_state = self._get_tokenomics_state(trie)
@@ -654,6 +736,10 @@ class Blockchain:
             # Proxy handles this; skip in logic
             pass
 
+        elif tx.tx_type == "SLASH":
+            validator_address = tx.data['validator_address']
+            self._slash_validator(validator_address, trie)
+
         elif tx.tx_type == "SWAP":
             self._process_swap(tx, trie)
         
@@ -663,6 +749,87 @@ class Blockchain:
         self._set_account(sender_address, sender_account, trie)
 
         return True
+
+    def _process_attestation(self, attestation: Attestation, trie: Trie):
+        """Processes a validator attestation."""
+        # 1. Verify signature
+        if not attestation.verify_signature():
+            raise ValidationError("Invalid attestation signature")
+
+        # 2. Check if validator is in the current validator set
+        validators = self._get_validator_set(trie)
+        validator_address = public_key_to_address(attestation.validator_pubkey).hex()
+        if validator_address not in validators:
+            raise ValidationError("Attestation from non-validator")
+
+        # 3. Check for double voting
+        attestations = self._get_attestations(trie)
+        if validator_address in attestations:
+            existing_attestation = attestations[validator_address]
+            if existing_attestation['target_epoch'] == attestation.target_epoch and \
+               existing_attestation['target_hash'] != attestation.target_hash.hex():
+                self._slash_validator(validator_address, trie)
+                return  # Do not process the malicious attestation
+
+        # 4. Store attestation
+        attestations[validator_address] = attestation.to_dict()
+        self._set_attestations(attestations, trie)
+
+        # 5. Check for finality
+        self._check_for_finality(trie)
+
+    def _check_for_finality(self, trie: Trie):
+        """Checks if an epoch can be justified or finalized."""
+        finality_state = self._get_finality_state(trie)
+        attestations = self._get_attestations(trie)
+        validators = self._get_validator_set(trie)
+        total_stake = sum(validators.values())
+
+        # Check for justification
+        justification_votes = defaultdict(int)
+        for validator_address, attestation_dict in attestations.items():
+            stake = validators.get(validator_address, 0)
+            justification_votes[attestation_dict['target_epoch']] += stake
+
+        for epoch, vote_count in justification_votes.items():
+            if vote_count >= total_stake * FINALITY_THRESHOLD:
+                if epoch > finality_state.justified_epoch:
+                    finality_state.justified_epoch = epoch
+                    self._set_finality_state(finality_state, trie)
+                    logger.info(f"Epoch {epoch} justified")
+
+        # Check for finalization
+        if finality_state.justified_epoch > finality_state.finalized_epoch + 1:
+            finality_state.finalized_epoch = finality_state.justified_epoch - 1
+            self._set_finality_state(finality_state, trie)
+            logger.info(f"Epoch {finality_state.finalized_epoch} finalized")
+
+            # Penalize inactive validators
+            active_validators = set(attestations.keys())
+            all_validators = set(validators.keys())
+            inactive_validators = all_validators - active_validators
+
+            for validator_address in inactive_validators:
+                self._inactivity_penalty(validator_address, trie)
+
+    def _inactivity_penalty(self, validator_address: str, trie: Trie):
+        """Applies an inactivity penalty to a validator."""
+        validators = self._get_validator_set(trie)
+        if validator_address not in validators:
+            return
+
+        stake = validators[validator_address]
+        penalty = min(stake, INACTIVITY_PENALTY)
+        validators[validator_address] -= penalty
+        self._set_validator_set(validators, trie)
+
+        # Burn the penalty amount
+        tokenomics = self._get_tokenomics_state(trie)
+        tokenomics.total_supply -= penalty
+        tokenomics.total_burned += penalty
+        self._set_tokenomics_state(tokenomics, trie)
+
+        logger.info(f"Validator {validator_address} penalized for inactivity.")
 
     def _process_swap(self, tx: Transaction, trie: Trie, sender_account: dict):
         """Processes a swap transaction using the constant product formula."""
@@ -730,6 +897,37 @@ class Blockchain:
             sender_account['balances']['native'] += actual_output
         
         self._set_liquidity_pool_state(pool, trie)
+
+    def _process_stake(self, tx: Transaction, trie: Trie, sender_address: bytes, sender_account: dict):
+        """Processes a stake transaction."""
+        amount = tx.data['amount']
+        if sender_account['balances']['native'] < amount:
+            raise ValidationError("Insufficient native funds for stake.")
+        
+        sender_account['balances']['native'] -= amount
+        
+        validator_set = self._get_validator_set(trie)
+        sender_hex = sender_address.hex()
+        validator_set[sender_hex] = validator_set.get(sender_hex, 0) + amount
+        self._set_validator_set(validator_set, trie)
+        self.leader_scheduler = LeaderScheduler(validator_set)
+
+    def _process_unstake(self, tx: Transaction, trie: Trie, sender_address: bytes, sender_account: dict):
+        """Processes an unstake transaction."""
+        amount = tx.data['amount']
+        addr_hex = sender_address.hex()
+        
+        validator_set = self._get_validator_set(trie)
+        if validator_set.get(addr_hex, 0) < amount:
+            raise ValidationError("Insufficient stake to unstake that amount.")
+            
+        validator_set[addr_hex] -= amount
+        if validator_set[addr_hex] == 0:
+            del validator_set[addr_hex]
+        self._set_validator_set(validator_set, trie)
+        self.leader_scheduler = LeaderScheduler(validator_set)
+        
+        sender_account['balances']['native'] += amount
 
     # ----------------------------------------------------------------------
     # ORACLE REGISTRATION
@@ -885,6 +1083,24 @@ class Blockchain:
         if self.oracle_stakes[pubkey] == 0:
             del self.oracle_stakes[pubkey]
             del self.oracle_pubkey_to_id[pubkey]
+
+    def _slash_validator(self, validator_address: str, trie: Trie):
+        """Slashes a validator for a consensus offense."""
+        validators = self._get_validator_set(trie)
+        if validator_address not in validators:
+            return
+
+        stake = validators[validator_address]
+        del validators[validator_address]
+        self._set_validator_set(validators, trie)
+
+        # Burn the validator's stake
+        tokenomics = self._get_tokenomics_state(trie)
+        tokenomics.total_supply -= stake
+        tokenomics.total_burned += stake
+        self._set_tokenomics_state(tokenomics, trie)
+
+        logger.warning(f"Validator {validator_address} slashed for consensus offense.")
 
     def validate_chain(self) -> bool:
         """Validates entire chain integrity."""

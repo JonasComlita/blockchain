@@ -163,12 +163,23 @@ class ValidatorNode:
                 return
             
             head = self.blockchain.get_head()
+            current_epoch = head.height // self.config.chain.epoch_length
+            
+            # Create and sign the attestation
+            from crypto_v2.chain import Attestation
+            attestation = Attestation(
+                source_epoch=self.blockchain.finality_state.justified_epoch,
+                target_epoch=current_epoch,
+                target_hash=head.hash,
+                validator_pubkey=self.validator_public_key_pem
+            )
+            attestation.sign(self.validator_private_key)
             
             # Create attestation transaction
             attest_tx = Transaction(
                 sender_public_key=self.validator_public_key_pem,
                 tx_type='ATTEST',
-                data={'block_hash': head.hash.hex()},
+                data=attestation.to_dict(),
                 nonce=self._get_next_nonce(),
                 fee=0,  # Attestations are free
                 chain_id=self.config.chain.chain_id
