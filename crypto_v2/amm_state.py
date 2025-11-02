@@ -107,6 +107,16 @@ class LiquidityPoolState:
             
             return numerator // denominator
     
+    def apply_swap(self, amount_in: int, input_is_token: bool):
+        output = self.get_swap_output(amount_in, input_is_token)
+        if input_is_token:
+            self.token_reserve += amount_in
+            self.usd_reserve -= output
+        else:
+            self.usd_reserve += amount_in
+            self.token_reserve -= output
+        return output
+
     def get_required_usd(self, token_amount: int) -> int:
         """
         Calculate USD needed to add liquidity with given tokens.

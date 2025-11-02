@@ -369,30 +369,19 @@ class Blockchain:
         
         return self.get_block(best_hash)
 
-    def _get_account(self, address: bytes, trie: Trie) -> dict:
-        """Get account data from the trie, providing a default structure if none exists."""
-        encoded_account = trie.get(address)
-        if encoded_account is None:
-            # Default structure for a new account with multi-asset balances
-            return {
-                'balances': {
-                    'native': 0,  # Represents the native GAME-Token
-                    'usd': 0         # Represents the USD-Token stablecoin
-                },
-                'nonce': 0,
-                'lp_tokens': 0
-            }
-        return msgpack.unpackb(encoded_account)
+    def _get_account(self, addr: bytes, trie) -> dict:
+        raw = trie.get(b"ACCOUNT:" + addr)
+        if not raw:
+            return {'balances': {'native': 0, 'usd': 0}, 'nonce': 0, 'lp_tokens': 0}
+        return msgpack.unpackb(raw)
     
     def get_account(self, address: bytes, state_trie=None) -> dict:
         """Public method to get an account from the state."""
         trie = state_trie if state_trie is not None else self.state_trie
         return self._get_account(address, trie)
 
-    def _set_account(self, address: bytes, account: dict, trie: Trie):
-        """Sets an account in state."""
-        encoded_account = msgpack.packb(account, use_bin_type=True)
-        trie.set(address, encoded_account)
+    def _set_account(self, addr: bytes, account: dict, trie):
+        trie.set(b"ACCOUNT:" + addr, msgpack.packb(account))
 
     def _get_validator_set(self, trie: Trie) -> dict:
         """Retrieves validator set."""
@@ -602,68 +591,7 @@ class Blockchain:
             self._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, trie)
 
         elif tx.tx_type == 'SWAP':
-            pool = self._get_liquidity_pool_state(trie)
-            input_amount = tx.data['amount_in']
-            min_output = tx.data['min_amount_out']
-            input_is_token = tx.data['token_in'] == 'native'
-
-            # --- NEW: WALLED GARDEN VALIDATION LOGIC ---
-
-            # Rule 1: Enforce Minimum Transaction Value ($1.00)
-            # We must use the integer representation for comparison
-            if pool.token_reserve > 0:
-                current_price_decimal = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
-            else:
-                current_price_decimal = Decimal(0)
-
-            if input_is_token:
-                usd_value_of_input_int = int((Decimal(input_amount) * current_price_decimal))
-            else: # Input is USD
-                usd_value_of_input_int = input_amount
-            
-            if usd_value_of_input_int < (1 * TOKEN_UNIT):
-                raise ValidationError(f"Transaction value is below the $1.00 minimum.")
-
-            # Rule 2: Enforce Maximum Transaction Size (50% of pool)
-            if input_is_token:
-                if input_amount >= pool.token_reserve / 2:
-                    raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
-            else: # Input is USD
-                if input_amount >= pool.usd_reserve / 2:
-                    raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
-
-            # --- END: WALLED GARDEN VALIDATION LOGIC ---
-
-            # Calculate swap output
-            output_amount = pool.get_swap_output(input_amount, input_is_token)
-            if output_amount == 0:
-                raise ValidationError("Swap would result in zero output.")
-            
-            if output_amount < min_output:
-                raise ValidationError(f"Output ({output_amount}) is less than minimum output ({min_output}).")
-
-            # --- END OF NEW VALIDATION ---
-
-            if input_is_token:
-                if sender_account['balances']['native'] < input_amount:
-                    raise ValidationError("Insufficient native token balance for swap.")
-                sender_account['balances']['native'] -= input_amount
-                if output_amount < min_output:
-                    raise ValidationError("Swap would result in less than minimum output.")
-                sender_account['balances']['usd'] += output_amount
-                pool.token_reserve += input_amount
-                pool.usd_reserve -= output_amount
-            else: # Input is USD
-                if sender_account['balances']['usd'] < input_amount:
-                    raise ValidationError("Insufficient USD token balance for swap.")
-                sender_account['balances']['usd'] -= input_amount
-                if output_amount < min_output:
-                    raise ValidationError("Swap would result in less than minimum output.")
-                sender_account['balances']['native'] += output_amount
-                pool.usd_reserve += input_amount
-                pool.token_reserve -= output_amount
-            
-            self._set_liquidity_pool_state(pool, trie)
+            self._process_swap(tx, trie, sender_account)
 
         elif tx.tx_type == 'ADD_LIQUIDITY':
             pool = self._get_liquidity_pool_state(trie)
@@ -725,6 +653,9 @@ class Blockchain:
         elif tx.tx_type == "UPGRADE_LOGIC":
             # Proxy handles this; skip in logic
             pass
+
+        elif tx.tx_type == "SWAP":
+            self._process_swap(tx, trie)
         
         # --- End of transaction-specific logic ---
 
@@ -732,6 +663,73 @@ class Blockchain:
         self._set_account(sender_address, sender_account, trie)
 
         return True
+
+    def _process_swap(self, tx: Transaction, trie: Trie, sender_account: dict):
+        """Processes a swap transaction using the constant product formula."""
+        if self.paused:
+            raise ValidationError("Chain paused")
+
+        data = tx.data
+        amount_in = data['amount_in']
+        token_in = data['token_in']
+        min_out = data['min_amount_out']
+        input_is_token = token_in == 'native'
+
+        pool = self._get_liquidity_pool_state(trie)
+
+        # Gracefully handle empty pools to prevent division by zero
+        if (input_is_token and pool.token_reserve == 0) or \
+           (not input_is_token and pool.usd_reserve == 0):
+             raise ValidationError("Swap with empty reserve")
+
+        # --- WALLED GARDEN VALIDATION LOGIC ---
+        # Rule 1: Enforce Minimum Transaction Value ($1.00)
+        if pool.token_reserve > 0:
+            current_price_decimal = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+        else:
+            current_price_decimal = Decimal(0)
+
+        if input_is_token:
+            usd_value_of_input_int = int((Decimal(amount_in) * current_price_decimal))
+        else: # Input is USD
+            usd_value_of_input_int = amount_in
+        
+        if usd_value_of_input_int < (1 * TOKEN_UNIT):
+            raise ValidationError("below the $1.00 minimum")
+
+        # Rule 2: Enforce Maximum Transaction Size (50% of pool)
+        if input_is_token:
+            if amount_in >= pool.token_reserve / 2:
+                raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
+        else: # Input is USD
+            if amount_in >= pool.usd_reserve / 2:
+                raise ValidationError("Transaction size is too large and exceeds the 50% maximum pool limit.")
+
+        # --- BALANCE CHECK ---
+        if input_is_token:
+            if sender_account['balances']['native'] < amount_in:
+                raise ValidationError("Insufficient native token balance for swap.")
+        else:
+            if sender_account['balances']['usd'] < amount_in:
+                raise ValidationError("Insufficient USD token balance for swap.")
+
+        # --- SWAP CALCULATION & SLIPPAGE ---
+        amount_out = pool.get_swap_output(amount_in, input_is_token)
+        if amount_out < min_out:
+            raise ValidationError(f"Output ({amount_out}) is less than minimum output ({min_out}).")
+
+        # --- APPLY SWAP ---
+        actual_output = pool.apply_swap(amount_in, input_is_token)
+        
+        # Update account balances
+        if input_is_token:
+            sender_account['balances']['native'] -= amount_in
+            sender_account['balances']['usd'] += actual_output
+        else:
+            sender_account['balances']['usd'] -= amount_in
+            sender_account['balances']['native'] += actual_output
+        
+        self._set_liquidity_pool_state(pool, trie)
 
     # ----------------------------------------------------------------------
     # ORACLE REGISTRATION
@@ -931,18 +929,22 @@ class Blockchain:
         encoded = msgpack.packb(state.to_dict(), use_bin_type=True)
         trie.set(TOKENOMICS_ADDRESS, encoded)
 
-    def _get_liquidity_pool_state(self, trie: Trie) -> LiquidityPoolState:
-        """Retrieve liquidity pool state from trie."""
-        encoded = trie.get(AMM_POOL_ADDRESS)
-        if encoded:
-            data = msgpack.unpackb(encoded, raw=False)
-            return LiquidityPoolState(data)
-        return LiquidityPoolState()
+    def _get_liquidity_pool_state(self, trie) -> LiquidityPoolState:
+        raw = trie.get(b"AMM_POOL")
+        if not raw:
+            return LiquidityPoolState({
+                'token_reserve': 0,
+                'usd_reserve': 0,
+                'lp_token_supply': 0
+            })
+        return LiquidityPoolState(msgpack.unpackb(raw))
     
-    def _set_liquidity_pool_state(self, state: LiquidityPoolState, trie: Trie):
-        """Store liquidity pool state in trie."""
-        encoded = msgpack.packb(state.to_dict(), use_bin_type=True)
-        trie.set(AMM_POOL_ADDRESS, encoded)
+    def _set_liquidity_pool_state(self, pool: LiquidityPoolState, trie):
+        trie.set(b"AMM_POOL", msgpack.packb({
+            'token_reserve': pool.token_reserve,
+            'usd_reserve': pool.usd_reserve,
+            'lp_token_supply': pool.lp_token_supply
+        }))
 
     def get_tokenomics_stats(self) -> dict:
         """Get current tokenomics statistics."""

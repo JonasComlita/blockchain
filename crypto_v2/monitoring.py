@@ -1,6 +1,7 @@
 # crypto_v2/monitoring.py
 import time
 import psutil
+import os
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 # --- Prometheus Metrics ---
@@ -24,11 +25,15 @@ ORACLE_FINALIZED = Counter('oracle_round_finalized_total', 'Oracle rounds finali
 class Monitor:
     def __init__(self, blockchain):
         self.chain = blockchain
-        self.last_tx_count = 0
-        self.last_time = time.time()
-        start_http_server(9090)  # Prometheus scrape endpoint
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            self.enabled = False
+            return
+        self.enabled = True
+        start_http_server(9090)
 
     def update(self):
+        if not self.enabled:
+            return
         latest = self.chain.get_latest_block()
         BLOCK_HEIGHT.set(latest.height)
 

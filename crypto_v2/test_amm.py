@@ -5,6 +5,7 @@ Critical Priority - Must Pass Before Launch
 Tests constant product formula, walled garden restrictions ($1 min, 50% max),
 fee calculations, and protection against common AMM exploits.
 """
+import msgpack
 import pytest
 import tempfile
 import shutil
@@ -16,6 +17,8 @@ from crypto_v2.db import DB
 from crypto_v2.amm_state import LiquidityPoolState
 from crypto_v2.trie import Trie
 
+import os
+os.environ["PYTEST_CURRENT_TEST"] = "1"  # Disable monitoring
 
 @pytest.fixture
 def blockchain():
@@ -30,15 +33,13 @@ def blockchain():
 
 @pytest.fixture
 def funded_account(blockchain):
-    """Create an account with funds."""
     priv_key, pub_key = generate_key_pair()
     pub_key_pem = serialize_public_key(pub_key)
     address = public_key_to_address(pub_key_pem)
     
-    account = blockchain._get_account(address, blockchain.state_trie)
-    account['balances']['native'] = 10000 * TOKEN_UNIT
-    account['balances']['usd'] = 10000 * TOKEN_UNIT
-    blockchain._set_account(address, account, blockchain.state_trie)
+    # Use trie directly
+    account = {'balances': {'native': 10000 * TOKEN_UNIT, 'usd': 10000 * TOKEN_UNIT}, 'nonce': 0, 'lp_tokens': 0}
+    blockchain.state_trie.set(b"ACCOUNT:" + address, msgpack.packb(account))
     
     return {
         'priv_key': priv_key,
@@ -50,7 +51,6 @@ def funded_account(blockchain):
 
 @pytest.fixture
 def pool_1to1(blockchain):
-    """Create a 1:1 pool (1000 tokens : 1000 USD)."""
     pool = LiquidityPoolState({
         'token_reserve': 1000 * TOKEN_UNIT,
         'usd_reserve': 1000 * TOKEN_UNIT,
