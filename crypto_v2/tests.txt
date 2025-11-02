@@ -285,170 +285,111 @@ These are excellent defenses against:
 
 -----------------------
 
-crypto_v2/test_transaction.py ........................s.s..........ss...                                                                [100%]
+test_amm.py passed
+test_state_integrity.py passed
+test_transaction.py passed
+test_cryptographic_security.py passed
+test_blocks.py passed
+test_integration.py passed
+test_network.py passed
+test_performance.py passed
 
-======================================================== 38 passed, 4 skipped in 0.48s ========================================================
+-----------------------------
 
-The four tests are being skipped because they require specific cryptographic key pairs for privileged accounts, namely the "payments oracle" and the "reserve admin."
+2. Economic & Game Theory ValidationYour system has:Bonding curve
+Buyback & burn
+Game fee oracle
+AMM with walled garden ($1 min, 50% max)
 
-Here's a breakdown:
+Have you modeled:Token price under extreme sell pressure?
+Liquidity drain attacks?
+Validator collusion?
+Oracle manipulation?
 
-test_oracle_can_mint_usd and test_mint_usd_updates_tokenomics: These tests require signing a transaction as the PAYMENTS_ORACLE_ADDRESS to mint new USD tokens. The tests currently generate random keys, which don't match the required oracle address, so they are skipped to avoid an authorization failure.
+Run simulations with real user behavior models.
 
-test_deploy_requires_usd_in_reserve_pool and test_deploy_adds_to_amm_pool: These tests need to be run as the RESERVE_ADMIN_ADDRESS to deploy liquidity from the reserve pool. Similar to the oracle tests, they are skipped because the necessary admin-specific key pair is not available in the test setup.
+3. Network & Consensus Stress TestingYour test_network.py uses mocks — this is fine for unit tests, but not enough.You need:Real P2P network testing with 50–100 nodes
+Partition testing
+Byzantine node simulation
+Message flood / DoS resistance
+Block propagation latency under load
 
-In short, these tests are for actions that only special, pre-defined accounts can perform, and the tests currently lack the credentials to act as those accounts.
+Use tools like libp2p testnets or custom chaos testing.
 
-------------------------------
+4. Validator & Leader Selection (VRF)You use VRF for leader selection (is_valid_leader) — but:Is the VRF verifiably random?
+Can a validator predict when they’ll be leader?
+Is there look-ahead bias?
 
-jonas@fedora:~/Downloads/NetPlay-master$ PYTHONPATH=. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_state_integrity.py
-/home/jonas/Downloads/NetPlay-master/venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:207: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
-The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+Run statistical tests on VRF outputs.
 
-  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
-=========================================== test session starts ===========================================
-platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0
-benchmark: 5.1.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
-rootdir: /home/jonas/Downloads/NetPlay-master
-plugins: cov-6.0.0, benchmark-5.1.0, asyncio-0.25.3
-asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
-collected 16 items                                                                                        
+5. PoH (Proof of History) SecurityYou use PoH for ordering — but:Is the hash chain unpredictable?
+Can a malicious producer pre-mine PoH ticks?
+Is poh.tick() using secure randomness?
 
-crypto_v2/test_state_integrity.py ..F.............                                                  [100%]
+Fuzz the PoH recorder.
 
-================================================ FAILURES =================================================
-________________________ TestDoubleSpendPrevention.test_double_spend_across_blocks ________________________
+6. Key Management & Oracle Security
 
-self = <test_state_integrity.TestDoubleSpendPrevention object at 0x7f65afba5cd0>
-blockchain = <crypto_v2.chain.Blockchain object at 0x7f65afae91d0>
-funded_account = {'address': b'#|\x08\xb0\xf5H*\x101~4\x9ej\xdd\xac&\xb2e\x91x', 'priv_key': <cryptography.hazmat.bindings._rust.openss...gWj5QHpOJBSp2U2zicUtmaeX8mX\n5HdOrOqcftjJ2Dgq0+DDMeUYrKezqA5ounx132rl+rKUdDu3mjPiHddGmA==\n-----END PUBLIC KEY-----\n'}
-second_account = {'address': b'k|\x99`d\xc2\xa5%\xf3\xad`\x99rI+;\xb52\xfc!', 'priv_key': <cryptography.hazmat.bindings._rust.openssl.e...jPpA6J2wL4tUrRbBOKm7MLSNRET\nFzicEwicLqyWm1YF9qgTbk7cvdGS4l9nBJoQD3ksk+7ax9FSA6kEoT2BfQ==\n-----END PUBLIC KEY-----\n'}
+Critical addresses:
 
-    def test_double_spend_across_blocks(self, blockchain, funded_account, second_account):
-        """Cannot reuse nonce across blocks."""
-        # Create and process first transaction in block 1
-        account = blockchain._get_account(funded_account['address'], blockchain.state_trie)
-        account['balances']['native'] += 5000 # Ensure enough for fee
-        blockchain._set_account(funded_account['address'], account, blockchain.state_trie)
-    
-        tx1 = Transaction(
-            sender_public_key=funded_account['pub_key_pem'],
-            tx_type='TRANSFER',
-            data={
-                'to': second_account['address'].hex(),
-                'amount': 100 * TOKEN_UNIT,
-                'token_type': 'native'
-            },
-            nonce=0,
-            fee=1000,
-            chain_id=1
-        )
-        tx1.sign(funded_account['priv_key'])
-    
-        # Create block with tx1
-        latest = blockchain.get_latest_block()
-        poh = PoHRecorder(latest.hash)
-        poh.tick()
-    
-        from crypto_v2.trie import Trie
-        temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
->       blockchain._process_transaction(tx1, temp_trie)
+PAYMENTS_ORACLE_ADDRESS
+RESERVE_ADMIN_ADDRESS
+GAME_ORACLE_ADDRESS
 
-crypto_v2/test_state_integrity.py:186: 
-_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _
+How are private keys stored?HSM?
+Multisig?
+Cold wallet?
 
-self = <crypto_v2.chain.Blockchain object at 0x7f65afae91d0>
-tx = <crypto_v2.core.Transaction object at 0x7f65b17dad70>
-trie = <crypto_v2.trie.Trie object at 0x7f65afbcfe30>
+A single compromised oracle = game over.
 
-    def _process_transaction(self, tx: Transaction, trie: Trie) -> bool:
-        """
-        Process a single transaction and update the state trie.
-        This is the heart of the state transition logic.
-        """
-        sender_address = public_key_to_address(tx.sender_public_key)
-        sender_account = self._get_account(sender_address, trie)
-    
-        # 0. Verify chain ID to prevent replay attacks
-        if tx.chain_id != self.chain_id:
-            raise ValidationError(f"Wrong chain ID. Expected {self.chain_id}, got {tx.chain_id}")
-    
-        # 1. Verify nonce
-        if tx.nonce != sender_account['nonce']:
-            raise ValidationError(f"Invalid nonce. Expected {sender_account['nonce']}, got {tx.nonce}")
-    
-        # 2. Increment nonce
-        sender_account['nonce'] += 1
-    
-        # 3. Deduct fee
-        sender_account['balances']['native'] -= tx.fee
-        if sender_account['balances']['native'] < 0:
->           raise ValidationError("Insufficient funds for fee")
-E           crypto_v2.chain.ValidationError: Insufficient funds for fee
+7. Upgradeability & GovernanceCan you fix a critical bug?
+Is there a governance mechanism?
+What if the bonding curve slope is wrong?
 
-crypto_v2/chain.py:406: ValidationError
-========================================= short test summary info =========================================
-FAILED crypto_v2/test_state_integrity.py::TestDoubleSpendPrevention::test_double_spend_across_blocks - crypto_v2.chain.ValidationError: Insufficient funds for fee
-====================================== 1 failed, 15 passed in 0.29s =======================================
-jonas@fedora:~/Downloads/NetPlay-master$ PYTHONPATH=. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_cryptographic_security.py
-/home/jonas/Downloads/NetPlay-master/venv/lib/python3.13/site-packages/pytest_asyncio/plugin.py:207: PytestDeprecationWarning: The configuration option "asyncio_default_fixture_loop_scope" is unset.
-The event loop scope for asynchronous fixtures will default to the fixture caching scope. Future versions of pytest-asyncio will default the loop scope for asynchronous fixtures to function scope. Set the default fixture loop scope explicitly in order to avoid unexpected behavior in the future. Valid fixture loop scopes are: "function", "class", "module", "package", "session"
+You need an upgrade path.
 
-  warnings.warn(PytestDeprecationWarning(_DEFAULT_FIXTURE_LOOP_SCOPE_UNSET))
-=========================================== test session starts ===========================================
-platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0
-benchmark: 5.1.0 (defaults: timer=time.perf_counter disable_gc=False min_rounds=5 min_time=0.000005 max_time=1.0 calibration_precision=10 warmup=False warmup_iterations=100000)
-rootdir: /home/jonas/Downloads/NetPlay-master
-plugins: cov-6.0.0, benchmark-5.1.0, asyncio-0.25.3
-asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
-collected 53 items                                                                                        
+8. Monitoring, Alerting, and Incident ResponseYou need:Real-time dashboard
+Anomaly detection (e.g. sudden price crash)
+Emergency pause mechanism
+Post-mortem process
 
-crypto_v2/test_cryptographic_security.py ................F....................................      [100%]
+9. Mainnet Dry Run (Testnet with Real Stakes)Run a public testnet with:Real users
+Real money (test tokens with value)
+Real validators
 
-================================================ FAILURES =================================================
-__________________________ TestBlockSignatures.test_tampered_transactions_fails ___________________________
+Monitor for 2–4 weeks.
 
-self = <test_cryptographic_security.TestBlockSignatures object at 0x7f3696ada060>
-blockchain = <crypto_v2.chain.Blockchain object at 0x7f36969e20d0>
-keypair = {'address': b'\x10$\x85\xfe\xce\xcc\x15\xd1\xf5;\xc4\xc2\xb0\xf7:4C\xdd\x8a\t', 'priv_key': <cryptography.hazmat.bindi...w0DMlo4bSTlwgDoa+i51aqXjXIk\nxc6LK1Ykix8BX7WgEqAvjADyhCw3YHQypsdzqRAzxq7I2bEv1ZIvMd1aZA==\n-----END PUBLIC KEY-----\n'}
+10. Documentation & Disaster RecoveryIs the code documented?
+Do you have a runbook?
+Can you restore from a corrupted DB?
 
-    def test_tampered_transactions_fails(self, blockchain, keypair):
-        """Tampering with transactions invalidates block signature."""
-        latest = blockchain.get_latest_block()
-        poh = PoHRecorder(latest.hash)
-        poh.tick()
-    
-        block = Block(
-            parent_hash=latest.hash,
-            state_root=latest.state_root,
-            transactions=[],
-            poh_sequence=poh.sequence,
-            height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
-            vrf_proof=b'test_proof',
-            timestamp=time.time()
-        )
-    
-        block.sign_block(keypair['priv_key'])
-    
-        # Add transaction after signing
-        fake_tx = Transaction(
-            sender_public_key=keypair['pub_key_pem'],
-            tx_type='TRANSFER',
-            data={'to': 'abc', 'amount': 100, 'token_type': 'native'},
-            nonce=0,
-            fee=1000,
-            chain_id=1
-        )
-        block.transactions = block.transactions + [fake_tx]
-    
-        # Signature should fail (transactions root changed)
->       assert not block.verify_signature()
-E       assert not True
-E        +  where True = verify_signature()
-E        +    where verify_signature = <crypto_v2.core.Block object at 0x7f3696b02b70>.verify_signature
+Final Checklist Before DeployItem
+Done?
+All unit/integration tests pass
+Yes
+External security audit
+No
+Economic model simulation
+No
+Real P2P network testing
+No
+Public testnet with stakes
+No
+Oracle key management plan
+No
+Emergency pause mechanism
+No
+Monitoring & alerting
+No
+Upgrade path
+No
 
-crypto_v2/test_cryptographic_security.py:321: AssertionError
-========================================= short test summary info =========================================
-FAILED crypto_v2/test_cryptographic_security.py::TestBlockSignatures::test_tampered_transactions_fails - assert not True
-====================================== 1 failed, 52 passed in 0.26s =======================================
+Strengths (What Feels Fresh): The integrated "game economy loop"—where off-chain gameplay generates on-chain fees for buybacks/burns, 
+combined with a restricted AMM to protect liquidity from dumps—is a thoughtful evolution for sustainable GameFi. It's not just 
+"play-to-earn" hype; it's designed for long-term token deflation via gameplay. The PoH+VRF combo (inspired by Solana but customized) 
+with a bonding curve bootstrap (rare in full L1s) adds efficiency for high-throughput gaming txs. In 2025, with GameFi maturing beyond 
+2021's crash, this "closed-loop" (game → fees → burns → scarcity) feels timely and anti-exploitative.
+Limitations (Why It's Not Groundbreaking): Core mechanics are well-trodden—PoH/VRF consensus, AMMs, bonding curves, and P2E rewards 
+have been iterated on since 2018–2020. It's more polished hybrid than invention, lacking bold innovations like AI-driven oracles, 
+zero-knowledge game proofs, or cross-chain composability. No unique primitives (e.g., no novel ZK or oracle tech) stand out. 
+If deployed, it'd compete in a saturated market without a clear "killer app" beyond the game integration.

@@ -1,0 +1,7 @@
+{
+  "title": "GameFi Chain",
+  "panels": [
+    { "type": "graph", "title": "TPS", "targets": [{ "expr": "rate(tx_processed_total[1m])" }] },
+    { "type": "stat", "title": "Paused?", "expr": "blockchain_paused" }
+  ]
+}

@@ -69,24 +69,44 @@ def second_account(blockchain):
 
 
 @pytest.fixture
-def oracle_account(blockchain):
-    """Create payments oracle account."""
-    # In real system, oracle would have specific keys
-    # For testing, create account at oracle address
+def mock_oracle(blockchain, monkeypatch):
+    """Create a mock oracle account with a valid keypair and monkeypatch the address."""
     priv_key, pub_key = generate_key_pair()
     pub_key_pem = serialize_public_key(pub_key)
-    
-    # Note: In production, PAYMENTS_ORACLE_ADDRESS would be derived from specific pubkey
-    # For testing, we'll set up account directly
-    account = blockchain._get_account(PAYMENTS_ORACLE_ADDRESS, blockchain.state_trie)
+    address = public_key_to_address(pub_key_pem)
+
+    monkeypatch.setattr('crypto_v2.chain.PAYMENTS_ORACLE_ADDRESS', address)
+
+    account = blockchain._get_account(address, blockchain.state_trie)
     account['balances']['native'] = 10000 * TOKEN_UNIT
-    blockchain._set_account(PAYMENTS_ORACLE_ADDRESS, account, blockchain.state_trie)
-    
+    blockchain._set_account(address, account, blockchain.state_trie)
+
     return {
         'priv_key': priv_key,
         'pub_key': pub_key,
         'pub_key_pem': pub_key_pem,
-        'address': PAYMENTS_ORACLE_ADDRESS
+        'address': address
+    }
+
+
+@pytest.fixture
+def mock_reserve_admin(blockchain, monkeypatch):
+    """Create a mock reserve admin account and monkeypatch the address."""
+    priv_key, pub_key = generate_key_pair()
+    pub_key_pem = serialize_public_key(pub_key)
+    address = public_key_to_address(pub_key_pem)
+
+    monkeypatch.setattr('crypto_v2.chain.RESERVE_ADMIN_ADDRESS', address)
+
+    account = blockchain._get_account(address, blockchain.state_trie)
+    account['balances']['native'] = 10000 * TOKEN_UNIT
+    blockchain._set_account(address, account, blockchain.state_trie)
+
+    return {
+        'priv_key': priv_key,
+        'pub_key': pub_key,
+        'pub_key_pem': pub_key_pem,
+        'address': address
     }
 
 
@@ -771,23 +791,15 @@ class TestEdgeCasesAndBoundaries:
 
 class TestMintUSDToken:
     """Test MINT_USD_TOKEN transaction type (oracle-only)."""
-    
-    def test_oracle_can_mint_usd(self, blockchain, second_account):
+
+    def test_oracle_can_mint_usd(self, blockchain, mock_oracle, second_account):
         """Payments oracle can mint USD tokens."""
         temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        
+
         mint_amount = 500 * TOKEN_UNIT
-        
-        # Create transaction from oracle address
-        priv_key, pub_key = generate_key_pair()
-        pub_key_pem = serialize_public_key(pub_key)
-        
-        # For this test, we need the sender to match PAYMENTS_ORACLE_ADDRESS
-        # In production, oracle would have specific keypair
-        # Here we mock by creating tx that appears to be from oracle
-        
+
         tx = Transaction(
-            sender_public_key=pub_key_pem,
+            sender_public_key=mock_oracle['pub_key_pem'],
             tx_type='MINT_USD_TOKEN',
             data={
                 'to': second_account['address'].hex(),
@@ -797,25 +809,17 @@ class TestMintUSDToken:
             fee=1000,
             chain_id=1
         )
-        tx.sign(priv_key)
-        
-        # Check if sender matches oracle
-        sender_addr = public_key_to_address(pub_key_pem)
-        
-        if sender_addr != PAYMENTS_ORACLE_ADDRESS:
-            # Need to test with actual oracle address
-            # Skip this test or set up proper oracle keys
-            pytest.skip("Need to set up oracle keypair matching PAYMENTS_ORACLE_ADDRESS")
-        
+        tx.sign(mock_oracle['priv_key'])
+
         blockchain._process_transaction(tx, temp_trie)
-        
+
         recipient = blockchain._get_account(second_account['address'], temp_trie)
         assert recipient['balances']['usd'] == mint_amount
-        
+
         # Check tokenomics updated
         tokenomics = blockchain._get_tokenomics_state(temp_trie)
         assert tokenomics.total_usd_in == Decimal(mint_amount) / Decimal(TOKEN_UNIT)
-    
+
     def test_non_oracle_cannot_mint_usd(self, blockchain, funded_account, second_account):
         """Non-oracle accounts cannot mint USD."""
         tx = Transaction(
@@ -830,22 +834,39 @@ class TestMintUSDToken:
             chain_id=1
         )
         tx.sign(funded_account['priv_key'])
-        
+
         temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        
+
         with pytest.raises(ValidationError, match="not authorized to mint USD"):
             blockchain._process_transaction(tx, temp_trie)
-    
-    def test_mint_usd_updates_tokenomics(self, blockchain, second_account):
+
+    def test_mint_usd_updates_tokenomics(self, blockchain, mock_oracle, second_account):
         """Minting USD updates tokenomics state."""
         temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        
+
         initial_tokenomics = blockchain._get_tokenomics_state(temp_trie)
         initial_usd_in = initial_tokenomics.total_usd_in
-        
-        # This test assumes we can create oracle transaction
-        # In production, would use actual oracle keys
-        pytest.skip("Need oracle keypair setup")
+
+        mint_amount = 250 * TOKEN_UNIT
+
+        tx = Transaction(
+            sender_public_key=mock_oracle['pub_key_pem'],
+            tx_type='MINT_USD_TOKEN',
+            data={
+                'to': second_account['address'].hex(),
+                'amount': mint_amount
+            },
+            nonce=0,
+            fee=1000,
+            chain_id=1
+        )
+        tx.sign(mock_oracle['priv_key'])
+
+        blockchain._process_transaction(tx, temp_trie)
+
+        new_tokenomics = blockchain._get_tokenomics_state(temp_trie)
+        expected_usd_in = initial_usd_in + (Decimal(mint_amount) / Decimal(TOKEN_UNIT))
+        assert new_tokenomics.total_usd_in == expected_usd_in
 
 
 class TestStakeTransaction:
@@ -1170,7 +1191,7 @@ class TestReserveBurnTransaction:
 
 class TestDeployReserveLiquidity:
     """Test DEPLOY_RESERVE_LIQUIDITY transaction (admin-only)."""
-    
+
     def test_non_admin_cannot_deploy_liquidity(self, blockchain, funded_account):
         """Non-admin accounts cannot deploy reserve liquidity."""
         tx = Transaction(
@@ -1182,21 +1203,66 @@ class TestDeployReserveLiquidity:
             chain_id=1
         )
         tx.sign(funded_account['priv_key'])
-        
+
         temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        
+
         with pytest.raises(ValidationError, match="Only the Reserve Admin"):
             blockchain._process_transaction(tx, temp_trie)
-    
-    def test_deploy_requires_usd_in_reserve_pool(self, blockchain):
+
+    def test_deploy_requires_usd_in_reserve_pool(self, blockchain, mock_reserve_admin):
         """Deploying liquidity requires USD in reserve pool."""
-        # This test would need admin keypair setup
-        # Similar to oracle test challenge
-        pytest.skip("Need reserve admin keypair setup")
-    
-    def test_deploy_adds_to_amm_pool(self, blockchain):
+        # Ensure reserve pool is empty
+        reserve_pool_account = blockchain._get_account(RESERVE_POOL_ADDRESS, blockchain.state_trie)
+        reserve_pool_account['balances']['usd'] = 0
+        blockchain._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, blockchain.state_trie)
+
+        tx = Transaction(
+            sender_public_key=mock_reserve_admin['pub_key_pem'],
+            tx_type='DEPLOY_RESERVE_LIQUIDITY',
+            data={},
+            nonce=0,
+            fee=1000,
+            chain_id=1
+        )
+        tx.sign(mock_reserve_admin['priv_key'])
+
+        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
+
+        with pytest.raises(ValidationError, match="No USD in reserve pool to deploy."):
+            blockchain._process_transaction(tx, temp_trie)
+
+    def test_deploy_adds_to_amm_pool(self, blockchain, mock_reserve_admin):
         """Deploying liquidity adds to AMM pool."""
-        pytest.skip("Need reserve admin keypair setup")
+        # Fund the reserve pool with USD
+        reserve_pool_account = blockchain._get_account(RESERVE_POOL_ADDRESS, blockchain.state_trie)
+        usd_to_deploy = 5000 * TOKEN_UNIT
+        reserve_pool_account['balances']['usd'] = usd_to_deploy
+        blockchain._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, blockchain.state_trie)
+
+        # Get initial AMM state
+        initial_pool = blockchain._get_liquidity_pool_state(blockchain.state_trie)
+
+        tx = Transaction(
+            sender_public_key=mock_reserve_admin['pub_key_pem'],
+            tx_type='DEPLOY_RESERVE_LIQUIDITY',
+            data={},
+            nonce=0,
+            fee=1000,
+            chain_id=1
+        )
+        tx.sign(mock_reserve_admin['priv_key'])
+
+        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
+        blockchain._process_transaction(tx, temp_trie)
+
+        # Check AMM pool was updated
+        final_pool = blockchain._get_liquidity_pool_state(temp_trie)
+        assert final_pool.usd_reserve > initial_pool.usd_reserve
+        assert final_pool.token_reserve > initial_pool.token_reserve
+
+        # Check reserve pool USD was used
+        final_reserve_pool = blockchain._get_account(RESERVE_POOL_ADDRESS, temp_trie)
+        assert final_reserve_pool['balances']['usd'] == 0
 
 
 class TestSwapTransaction:

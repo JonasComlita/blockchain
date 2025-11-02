@@ -1,0 +1,4 @@
+wasmtime
+msgpack
+PyNaCl
+psutil

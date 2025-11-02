@@ -27,16 +27,19 @@ except Exception:
 
     msgpack = _MsgpackShim()
 import logging
+import time
+import json
 from typing import Optional
 from decimal import Decimal
 from crypto_v2.core import Block, Transaction, BlockHeader
 from crypto_v2.db import DB
-from crypto_v2.crypto import generate_hash, public_key_to_address
+from crypto_v2.crypto import generate_hash, public_key_to_address, verify_signature
 from crypto_v2.trie import Trie, BLANK_ROOT
 from crypto_v2.poh import PoHRecorder, verify_poh_sequence
 from crypto_v2.consensus import is_valid_leader
 from crypto_v2.tokenomics_state import TokenomicsState
 from crypto_v2.amm_state import LiquidityPoolState
+from .monitoring import Monitor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,10 +55,23 @@ PAYMENTS_ORACLE_ADDRESS = b'\x00' * 19 + b'\x07'
 RESERVE_POOL_ADDRESS = b'\x00' * 19 + b'\x08'
 RESERVE_ADMIN_ADDRESS = b'\x00' * 19 + b'\x09'
 OUTFLOW_RESERVE_ADDRESS = b'\x00' * 19 + b'\x0A' # New address for the buyback & burn contract
+PAUSE_ADMIN_ADDRESS = bytes([0x00]*19 + [0x12])
 TREASURY_ADDRESS = b'\x00' * 19 + b'\xFF'
 
 # Configuration constants
 TOKEN_UNIT = 1_000_000
+
+# --- ORACLE CONSTANTS -------------------------------------------------
+ORACLE_AGGREGATOR_ADDRESS = bytes([0x00]*19 + [0x10])
+ORACLE_STAKE_ADDRESS      = bytes([0x00]*19 + [0x11])
+
+ORACLE_QUORUM            = 3          # minimum agreeing oracles
+ORACLE_BOND              = 1000 * TOKEN_UNIT
+ORACLE_SLASH_PERCENT     = 50         # % of bond slashed for misbehavior
+ORACLE_ROUND_TIMEOUT     = 300        # seconds
+ORACLE_MAX_DEVIATION_PCT = 5          # 5 % max deviation from median
+# --------------------------------------------------------------------
+
 CHECKPOINT_INTERVAL = 100
 MAX_BLOCK_SIZE = 1_000_000
 MAX_TXS_PER_BLOCK = 1000
@@ -70,6 +86,32 @@ BONDING_CURVE_SLOPE = Decimal('0.00000001')
 class ValidationError(Exception):
     """Raised when validation fails."""
     pass
+
+
+class OracleRound:
+    __slots__ = ('submissions', 'finalized', 'final_value', 'finalized_at')
+    def __init__(self):
+        self.submissions   = {}   # oracle_id -> signed payload dict
+        self.finalized     = False
+        self.final_value   = None
+        self.finalized_at  = 0
+
+    def to_dict(self):
+        return {
+            "submissions": self.submissions,
+            "finalized": self.finalized,
+            "final_value": self.final_value,
+            "finalized_at": self.finalized_at,
+        }
+
+    @staticmethod
+    def from_dict(d):
+        r = OracleRound()
+        r.submissions   = d["submissions"]
+        r.finalized     = d["finalized"]
+        r.final_value   = d["final_value"]
+        r.finalized_at  = d["finalized_at"]
+        return r
 
 
 class Blockchain:
@@ -90,6 +132,7 @@ class Blockchain:
         if head_hash is None:
             if genesis_block is None:
                 genesis = self._create_genesis_block()
+                genesis.state_root = BLANK_ROOT
             else:
                 genesis = genesis_block
                 
@@ -101,10 +144,20 @@ class Blockchain:
         
         self.latest_attestations = {}
         
+        self.oracle_rounds        = {}   # round_id -> OracleRound
+        self.current_oracle_round = 1
+        self.oracle_stakes        = {}   # pubkey_pem -> stake amount
+        self.oracle_pubkey_to_id  = {}   # pubkey_pem -> oracle_id (string)
+        
+        self.paused = False
+        self.pause_block = None  # block height when paused
+        
         latest_block = self.get_latest_block()
         self.state_trie = Trie(self.db, root_hash=latest_block.state_root)
         
         self._initialize_config()
+
+        self.monitor = Monitor(self)
 
     def _initialize_config(self):
         """Initialize chain configuration in state."""
@@ -203,103 +256,92 @@ class Blockchain:
 
     def add_block(self, block: Block) -> bool:
         """Adds a new block with comprehensive validation and atomic state updates."""
+        start = time.time()
         try:
-            self._validate_block(block)
+            # -----------------------------------------------------------------
+            #  2. PARENT / HEIGHT CHECK
+            # -----------------------------------------------------------------
+            parent = self.get_latest_block()
+            if block.parent_hash != parent.hash:
+                raise ValidationError("Parent hash mismatch")
+            if block.height != parent.height + 1:
+                raise ValidationError("Invalid block height")
+            if block.timestamp <= parent.timestamp:
+                raise ValidationError("Timestamp must be after parent")
+
+            # -----------------------------------------------------------------
+            #  3. RE-PROCESS TRANSACTIONS → STATE ROOT + FEE COLLECTION
+            # -----------------------------------------------------------------
+            temp_trie = Trie(self.db, root_hash=self.state_trie.root_hash)
             
-            original_state_root = self.state_trie.root_hash
-            temp_trie = Trie(self.db, root_hash=original_state_root)
-            
-            try:
+            # Producer Validation
+            validators = self._get_validator_set(temp_trie)
+            producer_addr = public_key_to_address(block.producer)
+            if producer_addr.hex() not in validators:
+                raise ValidationError("Producer is not a validator")
+
+            total_fees = 0
+            # Optimization: If state root matches, we can skip re-processing
+            if block.state_root != self.state_trie.root_hash:
                 for tx in block.transactions:
-                    if not self._process_transaction(tx, temp_trie):
-                        raise ValidationError(f"Invalid transaction: {tx.id.hex()}")
-                
-                if temp_trie.root_hash != block.state_root:
+                    tx_start = time.time()
+                    try:
+                        self._process_transaction(tx, temp_trie)
+                        latency = time.time() - tx_start
+                        self.monitor.record_tx("success", latency)
+                    except Exception as e:
+                        latency = time.time() - tx_start
+                        self.monitor.record_tx("failed", latency)
+                        raise
+                    total_fees += tx.fee
+
+                if block.state_root != temp_trie.root_hash:
                     raise ValidationError(
-                        f"State root mismatch. Expected: {block.state_root.hex()}, "
-                        f"Got: {temp_trie.root_hash.hex()}"
+                        f"State root mismatch. Expected: {temp_trie.root_hash.hex()}, "
+                        f"Got: {block.state_root.hex()}"
                     )
-                
-                self._store_block(block)
-                self.db.put(b'head', block.hash)
-                self.head_hash = block.hash
-                
-                # Update the main state trie to the new state root upon successful validation
-                self.state_trie = Trie(self.db, root_hash=block.state_root)
-                
-                logger.info(f"Block {block.height} added successfully: {block.hash.hex()[:16]}")
-                return True
-                
-            except ValidationError as e:
-                logger.error(f"Block validation failed: {e}")
-                return False
-                
+            else:
+                for tx in block.transactions:
+                    total_fees += tx.fee
+
+            # -----------------------------------------------------------------
+            #  4. PoH VALIDATION
+            # -----------------------------------------------------------------
+            parent_poh_hash = parent.poh_sequence[-1][0] if parent.poh_sequence else parent.hash
+            if not verify_poh_sequence(parent_poh_hash, block.poh_sequence):
+                raise ValidationError("Invalid Proof of History sequence")
+
+            # -----------------------------------------------------------------
+            #  5. COMMIT NEW STATE
+            # -----------------------------------------------------------------
+            self.state_trie = temp_trie
+            
+            # -----------------------------------------------------------------
+            #  6. REWARD PRODUCER WITH COLLECTED FEES
+            # -----------------------------------------------------------------
+            if total_fees > 0:
+                producer_addr = public_key_to_address(block.producer)
+                acc = self._get_account(producer_addr, self.state_trie)
+                acc['balances']['native'] = acc['balances'].get('native', 0) + total_fees
+                self._set_account(producer_addr, acc, self.state_trie)
+
+            # -----------------------------------------------------------------
+            #  7. UPDATE HEAD & STORE BLOCK
+            # -----------------------------------------------------------------
+            self.head_hash = block.hash
+            self.db.put(b'head', block.hash)
+            self._store_block(block)
+            
+            latency = time.time() - start
+            self.monitor.record_block(latency)
+            self.monitor.update()
+
+            logger.info(f"Block {block.height} added successfully")
+            return True
         except ValidationError as e:
             logger.error(f"Block rejected: {e}")
             return False
 
-    def _validate_block(self, block: Block):
-        """Comprehensive block validation."""
-        latest_block = self.get_latest_block()
-        
-        if block.parent_hash != latest_block.hash:
-            raise ValidationError("Invalid parent hash")
-        
-        if block.height != latest_block.height + 1:
-            raise ValidationError("Invalid block height")
-        
-        if block.timestamp <= latest_block.timestamp:
-            raise ValidationError("Block timestamp must be greater than parent")
-        
-        block_size = len(msgpack.packb(block.to_dict(), use_bin_type=True))
-        if block_size > MAX_BLOCK_SIZE:
-            raise ValidationError(f"Block too large: {block_size} bytes")
-        
-        if len(block.transactions) > MAX_TXS_PER_BLOCK:
-            raise ValidationError(f"Too many transactions: {len(block.transactions)}")
-        
-        if block.height > 0 and not block.verify_signature():
-            raise ValidationError("Invalid block signature")
-        
-        validators = self._get_validator_set(self.state_trie)
-        producer_addr = public_key_to_address(block.producer)
-        producer_account = self._get_account(producer_addr, self.state_trie)
-        
-        vrf_pub_key_hex = producer_account.get('vrf_pub_key')
-        if not vrf_pub_key_hex and block.height > 0:
-            raise ValidationError("Producer has no VRF pubkey")
-        
-        if block.height > 0 and not is_valid_leader(
-            block.producer,
-            block.vrf_proof,
-            validators,
-            latest_block.hash,
-            vrf_pub_key_hex,
-            producer_addr.hex(),
-            lambda addr: self._get_account(addr, self.state_trie)
-        ):
-            raise ValidationError("Invalid block producer")
-        
-        if latest_block.poh_sequence:
-            initial_hash = latest_block.poh_sequence[-1][0]
-        else:
-            initial_hash = latest_block.hash
-            
-        if not verify_poh_sequence(initial_hash, block.poh_sequence):
-            raise ValidationError("Invalid Proof of History sequence")
-        
-        seen_tx_ids = set()
-        for tx in block.transactions:
-            if tx.id in seen_tx_ids:
-                raise ValidationError(f"Duplicate transaction in block: {tx.id.hex()}")
-            seen_tx_ids.add(tx.id)
-            
-            is_valid, error = tx.validate_basic()
-            if not is_valid:
-                raise ValidationError(f"Invalid transaction: {error}")
-            
-            if tx.chain_id != self.chain_id:
-                raise ValidationError(f"Wrong chain ID: {tx.chain_id}")
 
     def get_head(self) -> Block:
         """Determines canonical head using LMD GHOST fork-choice."""
@@ -381,6 +423,15 @@ class Blockchain:
         encoded_attestations = msgpack.packb(attestations, use_bin_type=True)
         trie.set(ATTESTATION_ADDRESS, encoded_attestations)
 
+    def _get_oracle_round(self, round_id, trie):
+        key = b"ORACLE_ROUND:" + str(round_id).encode()
+        raw = trie.get(key)
+        return OracleRound.from_dict(msgpack.unpackb(raw)) if raw else OracleRound()
+
+    def _set_oracle_round(self, round_id, round_obj, trie):
+        key = b"ORACLE_ROUND:" + str(round_id).encode()
+        trie.set(key, msgpack.packb(round_obj.to_dict()))
+
     def _process_transaction(self, tx: Transaction, trie: Trie) -> bool:
         """
         Process a single transaction and update the state trie.
@@ -401,9 +452,16 @@ class Blockchain:
         sender_account['nonce'] += 1
 
         # 3. Deduct fee
-        sender_account['balances']['native'] -= tx.fee
-        if sender_account['balances']['native'] < 0:
-            raise ValidationError("Insufficient funds for fee")
+        fee_paid_in_usd = tx.tx_type == 'SWAP' and tx.data.get('token_in') == 'usd'
+        
+        if fee_paid_in_usd:
+            if sender_account['balances']['usd'] < tx.fee:
+                raise ValidationError("Insufficient USD funds for fee")
+            sender_account['balances']['usd'] -= tx.fee
+        else:
+            if sender_account['balances']['native'] < tx.fee:
+                raise ValidationError("Insufficient native funds for fee")
+            sender_account['balances']['native'] -= tx.fee
 
         # --- Transaction-specific logic ---
 
@@ -523,7 +581,10 @@ class Blockchain:
             # For simplicity, we'll mint a corresponding amount of native tokens
             # A real implementation might use a different strategy
             pool = self._get_liquidity_pool_state(trie)
-            price_per_token = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            if pool.token_reserve > 0:
+                price_per_token = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            else:
+                price_per_token = Decimal('1.0')  # Default price for initial liquidity
             native_to_mint_and_deploy = int(Decimal(usd_to_deploy) / price_per_token)
 
             tokenomics_state = self._get_tokenomics_state(trie)
@@ -649,12 +710,183 @@ class Blockchain:
             pool.lp_token_supply -= lp_amount
             self._set_liquidity_pool_state(pool, trie)
 
+        elif tx.tx_type == "ORACLE_SUBMIT":
+            self._process_oracle_submit(tx, trie)
+
+        elif tx.tx_type == "ORACLE_REGISTER":
+            self._process_oracle_register(tx, trie)
+
+        elif tx.tx_type == "ORACLE_UNREGISTER":
+            self._process_oracle_unregister(tx, trie)
+
+        elif tx.tx_type == "ORACLE_NEW_ROUND":
+            self._process_oracle_new_round(tx, trie)
+
+        elif tx.tx_type == "UPGRADE_LOGIC":
+            # Proxy handles this; skip in logic
+            pass
+        
         # --- End of transaction-specific logic ---
 
         # 4. Save the updated sender account
         self._set_account(sender_address, sender_account, trie)
 
         return True
+
+    # ----------------------------------------------------------------------
+    # ORACLE REGISTRATION
+    # ----------------------------------------------------------------------
+    def _process_oracle_register(self, tx, trie):
+        sender_addr = public_key_to_address(tx.sender_public_key)
+        sender_acc  = self._get_account(sender_addr, trie)
+
+        if sender_acc["balances"]["native"] < ORACLE_BOND:
+            raise ValidationError("Insufficient bond for oracle registration")
+
+        sender_acc["balances"]["native"] -= ORACLE_BOND
+        self.oracle_stakes[tx.sender_public_key] = ORACLE_BOND
+        # oracle_id is a short string, e.g. hex of first 8 bytes of pubkey
+        oracle_id = tx.sender_public_key[:8].hex()
+        self.oracle_pubkey_to_id[tx.sender_public_key] = oracle_id
+
+        self._set_account(sender_addr, sender_acc, trie)
+
+    # ----------------------------------------------------------------------
+    # ORACLE UNREGISTER
+    # ----------------------------------------------------------------------
+    def _process_oracle_unregister(self, tx, trie):
+        if tx.sender_public_key not in self.oracle_stakes:
+            raise ValidationError("Not a registered oracle")
+        sender_addr = public_key_to_address(tx.sender_public_key)
+        sender_acc  = self._get_account(sender_addr, trie)
+
+        sender_acc["balances"]["native"] += self.oracle_stakes[tx.sender_public_key]
+        del self.oracle_stakes[tx.sender_public_key]
+        del self.oracle_pubkey_to_id[tx.sender_public_key]
+
+        self._set_account(sender_addr, sender_acc, trie)
+
+    # ----------------------------------------------------------------------
+    # ORACLE NEW ROUND (admin only)
+    # ----------------------------------------------------------------------
+    def _process_oracle_new_round(self, tx, trie):
+        sender_addr = public_key_to_address(tx.sender_public_key)
+        if sender_addr != RESERVE_ADMIN_ADDRESS:
+            raise ValidationError("Only Reserve Admin can start oracle round")
+        self.current_oracle_round += 1
+
+    # ----------------------------------------------------------------------
+    # ORACLE SUBMISSION
+    # ----------------------------------------------------------------------
+    def _process_oracle_submit(self, tx, trie):
+        payload   = tx.data["payload"]
+        signature = bytes.fromhex(tx.data["signature"])
+        round_id  = tx.data["round_id"]
+
+        # 1. Verify signature
+        if not verify_signature(tx.sender_public_key, signature,
+                                json.dumps(payload, sort_keys=True).encode()):
+            raise ValidationError("Invalid oracle signature")
+
+        # 2. Must be bonded
+        if tx.sender_public_key not in self.oracle_stakes:
+            raise ValidationError("Oracle not bonded")
+
+        # 3. Load / create round
+        round = self._get_oracle_round(round_id, trie)
+        oracle_id = self.oracle_pubkey_to_id[tx.sender_public_key]
+
+        # 4. Prevent duplicates
+        if oracle_id in round.submissions:
+            raise ValidationError("Duplicate submission")
+
+        round.submissions[oracle_id] = payload
+        self._set_oracle_round(round_id, round, trie)
+
+        # 5. Try to finalize when quorum reached
+        if len(round.submissions) >= ORACLE_QUORUM and not round.finalized:
+            self._finalize_oracle_round(round_id, round, trie)
+
+    # ----------------------------------------------------------------------
+    # FINALIZATION (median + deviation + slashing)
+    # ----------------------------------------------------------------------
+    def _finalize_oracle_round(self, round_id, round, trie):
+        # Gather numeric values
+        values = []
+        sample_payload = next(iter(round.submissions.values()))
+        is_price = sample_payload["type"] == "PRICE_UPDATE"
+
+        for payload in round.submissions.values():
+            val = payload["usd_price"] if is_price else payload["reward_usd"]
+            values.append(val)
+
+        if not values:
+            return
+
+        values.sort()
+        median = values[len(values)//2]
+        max_dev = median * ORACLE_MAX_DEVIATION_PCT // 100
+        valid = [v for v in values if abs(v - median) <= max_dev]
+
+        if len(valid) < ORACLE_QUORUM:
+            return  # not enough consensus
+
+        # ---- Finalize ----
+        round.finalized   = True
+        round.final_value = median
+        round.finalized_at = int(time.time())
+        self._set_oracle_round(round_id, round, trie)
+
+        # ---- Apply to chain state ----
+        if is_price:
+            tokenomics = self._get_tokenomics_state(trie)
+            tokenomics.usd_price = median
+            self._set_tokenomics_state(tokenomics, trie)
+        else:
+            self._apply_game_reward(round, trie)
+
+        # ---- Slash outliers ----
+        for oracle_id, payload in round.submissions.items():
+            val = payload["usd_price"] if is_price else payload["reward_usd"]
+            if abs(val - median) > max_dev:
+                self._slash_oracle(oracle_id, trie)
+
+    # ----------------------------------------------------------------------
+    # GAME REWARD MINTING
+    # ----------------------------------------------------------------------
+    def _apply_game_reward(self, round, trie):
+        # All payloads should have the same winner
+        winner_addr_hex = None
+        for payload in round.submissions.values():
+            if payload.get("winner"):
+                winner_addr_hex = payload["winner"]
+                break
+        if not winner_addr_hex:
+            return
+
+        winner_addr = bytes.fromhex(winner_addr_hex)
+        acc = self._get_account(winner_addr, trie)
+        acc["balances"]["native"] += round.final_value
+        self._set_account(winner_addr, acc, trie)
+
+        tokenomics = self._get_tokenomics_state(trie)
+        tokenomics.total_minted += round.final_value
+        self._set_tokenomics_state(tokenomics, trie)
+
+    # ----------------------------------------------------------------------
+    # SLASHING
+    # ----------------------------------------------------------------------
+    def _slash_oracle(self, oracle_id, trie):
+        # reverse lookup
+        pubkey = next((k for k, v in self.oracle_pubkey_to_id.items() if v == oracle_id), None)
+        if not pubkey:
+            return
+        stake = self.oracle_stakes[pubkey]
+        slash = stake * ORACLE_SLASH_PERCENT // 100
+        self.oracle_stakes[pubkey] -= slash
+        if self.oracle_stakes[pubkey] == 0:
+            del self.oracle_stakes[pubkey]
+            del self.oracle_pubkey_to_id[pubkey]
 
     def validate_chain(self) -> bool:
         """Validates entire chain integrity."""

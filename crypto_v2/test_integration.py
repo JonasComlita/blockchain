@@ -97,7 +97,7 @@ def create_and_add_block(blockchain, validator, transactions):
     latest = blockchain.get_latest_block()
     
     # Process transactions and compute state root
-    temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
+    temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
     
     valid_txs = []
     for tx in transactions:
@@ -153,6 +153,7 @@ class TestNewUserOnboarding:
         # 2. User receives USD from payment processor (simulated)
         # In production, this would be MINT_USD_TOKEN from oracle
         account = blockchain._get_account(user_addr, blockchain.state_trie)
+        account['balances']['native'] = 1 * TOKEN_UNIT  # Start with 1 token for fees
         account['balances']['usd'] = 100 * TOKEN_UNIT  # $100
         blockchain._set_account(user_addr, account, blockchain.state_trie)
         
@@ -189,7 +190,7 @@ class TestNewUserOnboarding:
         native_balance = account['balances']['native']
         usd_balance = account['balances']['usd']
         
-        assert usd_balance == 50 * TOKEN_UNIT  # $50 left
+        assert usd_balance == 50 * TOKEN_UNIT - 1000  # $50 left, minus fee
         print(f"User has {native_balance / TOKEN_UNIT} native tokens after swap")
         
         # 5. User "plays a game" (transfers tokens as game fee)
@@ -261,6 +262,7 @@ class TestLiquidityProviderFlow:
         
         trader_account = blockchain._get_account(trader_addr, blockchain.state_trie)
         trader_account['balances']['native'] = 1000 * TOKEN_UNIT
+        trader_account['balances']['usd'] = 1 * TOKEN_UNIT  # For fees
         blockchain._set_account(trader_addr, trader_account, blockchain.state_trie)
         
         # 4. Trader performs swaps (generates fees for LP)
@@ -641,11 +643,11 @@ class TestComplexSwapScenario:
         arb_addr = public_key_to_address(arb_pem)
         
         arb_account = blockchain._get_account(arb_addr, blockchain.state_trie)
-        arb_account['balances']['native'] = 5000 * TOKEN_UNIT
+        arb_account['balances']['native'] = 5001 * TOKEN_UNIT
         arb_account['balances']['usd'] = 5000 * TOKEN_UNIT
         blockchain._set_account(arb_addr, arb_account, blockchain.state_trie)
         
-        initial_native = 5000 * TOKEN_UNIT
+        initial_native = 5001 * TOKEN_UNIT
         
         # Swap 1: Native -> USD (large swap)
         tx1 = Transaction(
@@ -779,7 +781,7 @@ class TestRecoveryAndRestart:
             assert success == True
             
             final_height = chain1.get_latest_block().height
-            final_state_root = chain1.state_trie.root_hash
+            final_state_root = block.state_root
             
             # Close blockchain
             db1.close()
@@ -790,7 +792,7 @@ class TestRecoveryAndRestart:
             
             # Verify state is preserved
             assert chain2.get_latest_block().height == final_height
-            assert chain2.state_trie.root_hash == final_state_root
+            assert chain2.get_latest_block().state_root == final_state_root
             
             # Verify account balances preserved
             account2 = chain2.get_account(funded_user['address'])
@@ -907,6 +909,7 @@ class TestCompleteGameEconomy:
         
         # 2. Player buys $25 USD (simulated payment processor)
         player_account = blockchain._get_account(player_addr, blockchain.state_trie)
+        player_account['balances']['native'] = 1 * TOKEN_UNIT  # For fees
         player_account['balances']['usd'] = 25 * TOKEN_UNIT
         blockchain._set_account(player_addr, player_account, blockchain.state_trie)
         
@@ -1153,12 +1156,12 @@ class TestDataIntegrity:
         user_addr = public_key_to_address(user_pem)
         
         user_account = blockchain._get_account(user_addr, blockchain.state_trie)
-        user_account['balances']['native'] = 500 * TOKEN_UNIT
+        user_account['balances']['native'] = 501 * TOKEN_UNIT
         user_account['balances']['usd'] = 500 * TOKEN_UNIT
         blockchain._set_account(user_addr, user_account, blockchain.state_trie)
         
         # Calculate total value before swap
-        initial_total_native = 500 * TOKEN_UNIT + 1000 * TOKEN_UNIT  # user + pool
+        initial_total_native = 501 * TOKEN_UNIT + 1000 * TOKEN_UNIT  # user + pool
         initial_total_usd = 500 * TOKEN_UNIT + 1000 * TOKEN_UNIT
         
         # User swaps

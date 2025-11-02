@@ -199,7 +199,7 @@ class TestDoubleSpendPrevention:
         
         # Add block
         blockchain.add_block(block1)
-        self.state_trie = Trie(self.db, root_hash=block1.state_root)
+        blockchain.state_trie = Trie(blockchain.db, root_hash=block1.state_root)
         
         # Try to create another transaction with same nonce
         tx2 = Transaction(
@@ -385,7 +385,7 @@ class TestBalanceUnderflow:
         from crypto_v2.trie import Trie
         temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
         
-        with pytest.raises(ValidationError, match="Insufficient funds for fee"):
+        with pytest.raises(ValidationError, match="Insufficient native funds for fee"):
             blockchain._process_transaction(tx, temp_trie)
     
     def test_insufficient_for_stake(self, blockchain, funded_account):
