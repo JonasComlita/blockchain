@@ -4,7 +4,7 @@ Pipelined Block Producer
 import time
 import threading
 from crypto_v2.core import Block
-from crypto_v2.crypto import public_key_to_address
+from crypto_v2.crypto import public_key_to_address, vrf_prove, serialize_public_key
 
 class BlockProducer(threading.Thread):
     def __init__(self, blockchain, mempool, poh_generator, key_pair):
@@ -22,7 +22,9 @@ class BlockProducer(threading.Thread):
             
             latest_block = self.blockchain.get_latest_block()
             leader = self.blockchain.leader_scheduler.get_leader(latest_block.hash)
-            my_address = public_key_to_address(self.key_pair['pub_key_pem']).hex()
+            
+            pub_key_pem = serialize_public_key(self.key_pair['pub_key'])
+            my_address = public_key_to_address(pub_key_pem).hex()
 
             if leader == my_address:
                 # It's our turn to produce a block
@@ -34,17 +36,20 @@ class BlockProducer(threading.Thread):
                 
                 poh_sequence, _ = self.poh_generator.get_proof()
                 
+                # Generate VRF proof
+                vrf_proof, _ = vrf_prove(self.key_pair['vrf_priv_key'], latest_block.hash)
+                
                 # Create the new block
                 new_block = Block(
                     parent_hash=latest_block.hash,
                     state_root=b'',  # This will be calculated by the blockchain
                     transactions=transactions,
-                    poh_sequence=poh_sequence,
-                    height=latest_block.height + 1,
-                    producer_pubkey=self.key_pair['pub_key_pem'].hex(),
-                    vrf_proof=b'',  # This should be the VRF proof
-                    vrf_pub_key=b'',  # This should be the VRF public key
+                    poh_sequence=poh_sequence[1:],
                     poh_initial=poh_sequence[0][0],
+                    height=latest_block.height + 1,
+                    producer_pubkey=pub_key_pem,
+                    vrf_proof=vrf_proof,
+                    vrf_pub_key=self.key_pair['vrf_pub_key'],
                 )
                 
                 # Sign the block

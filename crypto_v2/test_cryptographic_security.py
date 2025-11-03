@@ -18,6 +18,7 @@ from crypto_v2.crypto import (
 )
 from crypto_v2.db import DB
 from crypto_v2.poh import PoHRecorder, verify_poh_sequence
+from crypto_v2.trie import BLANK_ROOT
 import nacl.signing
 
 
@@ -26,6 +27,29 @@ def blockchain():
     """Create a temporary blockchain for testing."""
     temp_dir = tempfile.mkdtemp()
     db = DB(temp_dir)
+    
+    # Manually create and store a genesis block
+    genesis = Block(
+        parent_hash=b'\x00' * 32,
+        state_root=BLANK_ROOT,
+        transactions=[],
+        poh_sequence=[],
+        poh_initial=b'\x00' * 32,
+        height=0,
+        producer_pubkey=b'genesis',
+        vrf_proof=b'genesis',
+        vrf_pub_key=b'genesis',
+        timestamp=0,
+        signature=b'genesis_signature'
+    )
+    
+    # Store the block and set it as head
+    import msgpack
+    block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
+    db.put(genesis.hash, block_data)
+    db.put(b'height:0', genesis.hash)
+    db.put(b'head', genesis.hash)
+
     chain = Blockchain(db=db, chain_id=1)
     yield chain
     db.close()
@@ -257,9 +281,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=time.time()
         )
         
@@ -278,9 +304,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=time.time()
         )
         # Don't sign
@@ -298,9 +326,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=time.time()
         )
         
@@ -331,9 +361,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=time.time()
         )
         
@@ -355,9 +387,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=12345.0  # Fixed timestamp
         )
         
@@ -366,9 +400,11 @@ class TestBlockSignatures:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0] if poh.sequence else latest.hash,
             height=latest.height + 1,
-            producer=keypair['pub_key_pem'],
+            producer_pubkey=keypair['pub_key_pem'],
             vrf_proof=b'test_proof',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=12345.0  # Same timestamp
         )
         

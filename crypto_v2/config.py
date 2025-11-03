@@ -51,12 +51,20 @@ class DatabaseConfig:
 
 
 @dataclass
+class MonitoringConfig:
+    """Monitoring configuration."""
+    host: str = "127.0.0.1"
+    port: int = 9090
+
+
+@dataclass
 class Config:
     """Main configuration."""
     network: NetworkConfig
     chain: ChainConfig
     mempool: MempoolConfig
     database: DatabaseConfig
+    monitoring: MonitoringConfig
     
     @classmethod
     def default(cls) -> 'Config':
@@ -65,7 +73,8 @@ class Config:
             network=NetworkConfig(),
             chain=ChainConfig(),
             mempool=MempoolConfig(),
-            database=DatabaseConfig()
+            database=DatabaseConfig(),
+            monitoring=MonitoringConfig()
         )
     
     @classmethod
@@ -78,7 +87,8 @@ class Config:
             network=NetworkConfig(**data.get('network', {})),
             chain=ChainConfig(**data.get('chain', {})),
             mempool=MempoolConfig(**data.get('mempool', {})),
-            database=DatabaseConfig(**data.get('database', {}))
+            database=DatabaseConfig(**data.get('database', {})),
+            monitoring=MonitoringConfig(**data.get('monitoring', {}))
         )
     
     def to_file(self, path: str):
@@ -87,7 +97,8 @@ class Config:
             'network': asdict(self.network),
             'chain': asdict(self.chain),
             'mempool': asdict(self.mempool),
-            'database': asdict(self.database)
+            'database': asdict(self.database),
+            'monitoring': asdict(self.monitoring)
         }
         
         os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
@@ -100,5 +111,6 @@ class Config:
             'network': asdict(self.network),
             'chain': asdict(self.chain),
             'mempool': asdict(self.mempool),
-            'database': asdict(self.database)
+            'database': asdict(self.database),
+            'monitoring': asdict(self.monitoring)
         }

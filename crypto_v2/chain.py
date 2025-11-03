@@ -180,7 +180,7 @@ class Attestation:
 
 class Blockchain:
     def __init__(self, db_path: str = None, db: DB = None, genesis_block: Block = None, 
-                 chain_id: int = 1, game_oracle_pubkey: bytes = None):
+                 chain_id: int = 1, game_oracle_pubkey: bytes = None, monitoring_host: str = "127.0.0.1", monitoring_port: int = 9090):
         if db:
             self.db = db
         elif db_path:
@@ -191,40 +191,48 @@ class Blockchain:
         self.chain_id = chain_id
         self.block_pool: dict[bytes, Block] = {}
         self.game_oracle_address = public_key_to_address(game_oracle_pubkey) if game_oracle_pubkey else GAME_ORACLE_ADDRESS
+        self.reserve_admin_address = RESERVE_ADMIN_ADDRESS
+        self.min_oracle_submissions = 3
         
         head_hash = self.db.get(b'head')
         if head_hash is None:
-            if genesis_block is None:
-                genesis = self._create_genesis_block()
-                genesis.state_root = BLANK_ROOT
-            else:
-                genesis = genesis_block
-                
-            self._store_block(genesis)
-            self.db.put(b'head', genesis.hash)
-            self.head_hash = genesis.hash
-        else:
-            self.head_hash = head_hash
+            raise Exception("Blockchain database not initialized. Please create a genesis block first.")
         
+        self.head_hash = head_hash
+        
+        latest_block = self.get_latest_block()
+        root_hash = latest_block.state_root if isinstance(latest_block.state_root, bytes) else bytes.fromhex(latest_block.state_root)
+        self.state_trie = Trie(self.db, root_hash=root_hash)
+
         self.latest_attestations = {}
         self.finality_state = self._get_finality_state(self.state_trie)
         
         self.oracle_rounds        = {}   # round_id -> OracleRound
         self.current_oracle_round = 1
-        self.oracle_stakes        = {}   # pubkey_pem -> stake amount
-        self.oracle_pubkey_to_id  = {}   # pubkey_pem -> oracle_id (string)
+        self.oracle_stakes        = self._get_oracle_stakes(self.state_trie)
+        self.oracle_pubkey_to_id  = {pk: pk[:8].hex() for pk in self.oracle_stakes}
         
         self.paused = False
         self.pause_block = None  # block height when paused
-        
-        latest_block = self.get_latest_block()
-        self.state_trie = Trie(self.db, root_hash=latest_block.state_root)
         
         self.leader_scheduler = LeaderScheduler(self._get_validator_set(self.state_trie))
         
         self._initialize_config()
 
-        self.monitor = Monitor(self)
+        logger.info(f"Initializing Monitor with host={monitoring_host}, port={monitoring_port}")
+        self.monitor = Monitor(self, host=monitoring_host, port=monitoring_port)
+
+    def _get_oracle_stakes(self, trie: Trie) -> dict:
+        """Get oracle stakes from the trie."""
+        encoded = trie.get(ORACLE_STAKE_ADDRESS)
+        if encoded:
+            return msgpack.unpackb(encoded, raw=False)
+        return {}
+
+    def _set_oracle_stakes(self, stakes: dict, trie: Trie):
+        """Set oracle stakes in the trie."""
+        encoded = msgpack.packb(stakes, use_bin_type=True)
+        trie.set(ORACLE_STAKE_ADDRESS, encoded)
 
     def _initialize_config(self):
         """Initialize chain configuration in state."""
@@ -271,24 +279,6 @@ class Blockchain:
             }
         return None
 
-    def _create_genesis_block(self) -> Block:
-        """Creates the genesis block."""
-        initial_hash = b'\x00' * 32
-        poh_recorder = PoHRecorder(initial_hash)
-        poh_recorder.tick()
-
-        return Block(
-            parent_hash=b'\x00' * 32,
-            state_root=BLANK_ROOT,
-            transactions=[],
-            poh_sequence=poh_recorder.sequence,
-            height=0,
-            producer=b'genesis',
-            vrf_proof=b'genesis',
-            timestamp=0.0,
-            signature=b'genesis'
-        )
-
     def _store_block(self, block: Block):
         """Serializes and stores a block."""
         block_data = msgpack.packb(block.to_dict(), use_bin_type=True)
@@ -299,11 +289,55 @@ class Blockchain:
 
     def get_block(self, block_hash: bytes) -> Block | None:
         """Retrieves a block from the database."""
-        block_data = self.db.get(block_hash)
+        block_data = self.db.get(b'block:' + block_hash)
         if block_data is None:
             return None
         
         block_dict = msgpack.unpackb(block_data, raw=False)
+        
+        # --- Full Migration & Type Safety ---
+        default_bytes = b'\x00' * 32
+        byte_fields = ['parent_hash', 'state_root', 'producer_pubkey', 'vrf_proof',
+                       'vrf_pub_key', 'signature', 'poh_initial']
+
+        for field in byte_fields:
+            if field not in block_dict:
+                block_dict[field] = default_bytes if 'hash' in field or 'root' in field else b''
+            val = block_dict[field]
+            if isinstance(val, str):
+                try:
+                    block_dict[field] = bytes.fromhex(val)
+                except ValueError:
+                    block_dict[field] = val.encode('utf-8') if val else b''
+            elif not isinstance(val, bytes):
+                block_dict[field] = b''
+
+        if 'attestations' not in block_dict:
+            block_dict['attestations'] = []
+
+        # Fix poh_sequence
+        if 'poh_sequence' in block_dict:
+            seq = []
+            for item in block_dict['poh_sequence']:
+                h, e = item if isinstance(item, (list, tuple)) else (item, None)
+                h_bytes = h
+                if isinstance(h, str):
+                    try:
+                        h_bytes = bytes.fromhex(h)
+                    except:
+                        h_bytes = h.encode('utf-8')
+                e_bytes = None
+                if e:
+                    if isinstance(e, str):
+                        try:
+                            e_bytes = bytes.fromhex(e)
+                        except:
+                            e_bytes = e.encode('utf-8')
+                    elif isinstance(e, bytes):
+                        e_bytes = e
+                seq.append((h_bytes, e_bytes))
+            block_dict['poh_sequence'] = seq
+        
         transactions = [Transaction(**tx) for tx in block_dict['transactions']]
         block_dict['transactions'] = transactions
         
@@ -344,12 +378,12 @@ class Blockchain:
             # Producer Validation
             validators = self._get_validator_set(temp_trie)
             if not is_valid_leader(
-                producer_pubkey_hex=block.producer_pubkey,
+                producer_pubkey_hex=block.producer_pubkey.hex(),
                 vrf_proof=block.vrf_proof,
                 validators=validators,
                 seed=parent.hash,
-                vrf_pub_key_hex=block.vrf_pub_key,
-                producer_address_hex=public_key_to_address(bytes.fromhex(block.producer_pubkey)).hex()
+                vrf_pub_key_hex=block.vrf_pub_key.hex(),
+                producer_address_hex=public_key_to_address(block.producer_pubkey).hex()
             ):
                 raise ValidationError("Invalid block producer")
 
@@ -362,21 +396,22 @@ class Blockchain:
                         self._process_transaction(tx, temp_trie)
                         latency = time.time() - tx_start
                         self.monitor.record_tx("success", latency)
+                        total_fees += tx.fee
                     except Exception as e:
                         latency = time.time() - tx_start
                         self.monitor.record_tx("failed", latency)
-                        raise
-                    total_fees += tx.fee
+                        logger.warning(f"Transaction {tx.id.hex()} failed validation: {e}")
+                        # Do not re-raise; continue processing other transactions
+
+                # Process attestations before state root validation
+                for attestation in block.attestations:
+                    self._process_attestation(attestation, temp_trie)
 
                 if block.state_root != temp_trie.root_hash:
                     raise ValidationError(
                         f"State root mismatch. Expected: {temp_trie.root_hash.hex()}, "
                         f"Got: {block.state_root.hex()}"
                     )
-                
-                # Process attestations
-                for attestation in block.attestations:
-                    self._process_attestation(attestation, temp_trie)
             else:
                 for tx in block.transactions:
                     total_fees += tx.fee
@@ -397,12 +432,10 @@ class Blockchain:
             #  6. REWARD PRODUCER WITH COLLECTED FEES
             # -----------------------------------------------------------------
             if total_fees > 0:
-                producer_addr = public_key_to_address(block.producer)
+                producer_addr = public_key_to_address(block.producer_pubkey)
                 acc = self._get_account(producer_addr, self.state_trie)
                 acc['balances']['native'] = acc['balances'].get('native', 0) + total_fees
-                self._set_account(producer_addr, acc, self.state_trie)
-
-            # -----------------------------------------------------------------
+                self._set_account(producer_addr, acc, self.state_trie)            # -----------------------------------------------------------------
             #  7. UPDATE HEAD & STORE BLOCK
             # -----------------------------------------------------------------
             self.head_hash = block.hash
@@ -940,12 +973,14 @@ class Blockchain:
             raise ValidationError("Insufficient bond for oracle registration")
 
         sender_acc["balances"]["native"] -= ORACLE_BOND
-        self.oracle_stakes[tx.sender_public_key] = ORACLE_BOND
+        
         # oracle_id is a short string, e.g. hex of first 8 bytes of pubkey
-        oracle_id = tx.sender_public_key[:8].hex()
+        oracle_id = generate_hash(tx.sender_public_key)[:16].hex()
         self.oracle_pubkey_to_id[tx.sender_public_key] = oracle_id
+        self.oracle_stakes[oracle_id] = ORACLE_BOND
 
         self._set_account(sender_addr, sender_acc, trie)
+        self._set_oracle_stakes(self.oracle_stakes, trie)
 
     # ----------------------------------------------------------------------
     # ORACLE UNREGISTER
@@ -967,7 +1002,7 @@ class Blockchain:
     # ----------------------------------------------------------------------
     def _process_oracle_new_round(self, tx, trie):
         sender_addr = public_key_to_address(tx.sender_public_key)
-        if sender_addr != RESERVE_ADMIN_ADDRESS:
+        if sender_addr != self.reserve_admin_address:
             raise ValidationError("Only Reserve Admin can start oracle round")
         self.current_oracle_round += 1
 
@@ -984,18 +1019,18 @@ class Blockchain:
                                 json.dumps(payload, sort_keys=True).encode()):
             raise ValidationError("Invalid oracle signature")
 
-        # 2. Must be bonded
-        if tx.sender_public_key not in self.oracle_stakes:
+        # 2. Must be registered and bonded
+        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key)
+        if not oracle_id:
+            raise ValidationError("Oracle not registered")
+        if oracle_id not in self.oracle_stakes:
             raise ValidationError("Oracle not bonded")
-
+    
         # 3. Load / create round
-        round = self._get_oracle_round(round_id, trie)
-        oracle_id = self.oracle_pubkey_to_id[tx.sender_public_key]
-
-        # 4. Prevent duplicates
+        round = self._get_oracle_round(round_id, trie)        # 4. Prevent duplicates
         if oracle_id in round.submissions:
             raise ValidationError("Duplicate submission")
-
+ 
         round.submissions[oracle_id] = payload
         self._set_oracle_round(round_id, round, trie)
 

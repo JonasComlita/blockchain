@@ -2,4 +2,4 @@ msgpack
 pynacl
 plyvel
 rlp
-pycryptodome
+pycryptodomeminiupnpc

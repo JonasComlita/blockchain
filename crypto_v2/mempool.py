@@ -98,15 +98,17 @@ class Mempool:
                         return False, f"Nonce too low: {tx.nonce} < {account['nonce']}"
                     
                     # Check if sender has sufficient balance (rough estimate)
+                    # This check assumes fees are paid in native tokens for simplicity.
+                    # The final check in _process_transaction is the authoritative one.
                     estimated_cost = tx.fee
-                    if tx.tx_type == 'TRANSFER':
-                        estimated_cost += tx.data.get('amount', 0)
-                    elif tx.tx_type == 'STAKE':
-                        estimated_cost += tx.data.get('amount', 0)
-                    
-                    if account['balance'] < estimated_cost:
+                    if tx.tx_type in ('TRANSFER', 'STAKE'):
+                        # Only add amount if it's a native token operation
+                        if tx.data.get('token_type', 'native') == 'native':
+                            estimated_cost += tx.data.get('amount', 0)
+
+                    if account['balances']['native'] < estimated_cost:
                         self.stats['total_rejected'] += 1
-                        return False, "Insufficient balance"
+                        return False, "Insufficient balance for estimated cost"
                 
                 # Add transaction
                 self.pending_txs[sender_address][tx.nonce] = tx

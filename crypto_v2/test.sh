@@ -6,3 +6,4 @@ PYTHONPATH=.. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/D
 PYTHONPATH=.. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_integration.py
 PYTHONPATH=.. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_network.py
 PYTHONPATH=.. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_performance.py
+PYTHONPATH=.. /home/jonas/Downloads/NetPlay-master/venv/bin/pytest /home/jonas/Downloads/NetPlay-master/crypto_v2/test_oracle.py

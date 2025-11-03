@@ -168,25 +168,28 @@ class BlockHeader:
                  transactions_root: bytes,
                  height: int,
                  timestamp: float,
-                 producer: str,
-                 vrf_proof: bytes):
+                 producer_pubkey: bytes,
+                 vrf_proof: bytes,
+                 vrf_pub_key: bytes):
         self.parent_hash = parent_hash
         self.state_root = state_root
         self.transactions_root = transactions_root
         self.height = height
         self.timestamp = timestamp
-        self.producer = producer
+        self.producer_pubkey = producer_pubkey.encode('utf-8') if isinstance(producer_pubkey, str) else producer_pubkey
         self.vrf_proof = vrf_proof
+        self.vrf_pub_key = vrf_pub_key
 
     def to_dict(self):
         return {
-            "parent_hash": self.parent_hash,
-            "state_root": self.state_root,
-            "transactions_root": self.transactions_root,
+            "parent_hash": self.parent_hash.hex(),
+            "state_root": self.state_root.hex(),
+            "transactions_root": self.transactions_root.hex(),
             "height": self.height,
             "timestamp": self.timestamp,
-            "producer": self.producer,
-            "vrf_proof": self.vrf_proof,
+            "producer_pubkey": self.producer_pubkey.hex(),
+            "vrf_proof": self.vrf_proof.hex(),
+            "vrf_pub_key": self.vrf_pub_key.hex(),
         }
 
     def calculate_hash(self) -> bytes:
@@ -201,17 +204,31 @@ class Block:
                  transactions: list[Transaction],
                  poh_sequence: list[tuple[bytes, bytes | None]],
                  height: int,
-                 producer: str,
+                 producer_pubkey: bytes,
                  vrf_proof: bytes,
+                 vrf_pub_key: bytes,
+                 poh_initial: bytes,
                  timestamp: Optional[float] = None,
-                 signature: Optional[bytes] = None):
+                 signature: Optional[bytes] = None,
+                 attestations: Optional[list] = None):
+        
         self.parent_hash = parent_hash
         self._state_root = state_root
         self._transactions = transactions
         self.poh_sequence = poh_sequence
+        self.poh_initial = poh_initial
         self.height = height
-        self.producer = producer
+
+        # Producer identification
+        self.producer_pubkey = producer_pubkey
+        
+        # VRF fields
         self.vrf_proof = vrf_proof
+        self.vrf_pub_key = vrf_pub_key
+        
+        # Finality
+        self.attestations = attestations or []
+
         self.timestamp = timestamp or time.time()
         self.transactions_root = self._calculate_transactions_root()
         self.signature = signature
@@ -276,22 +293,26 @@ class Block:
                 transactions_root=self.transactions_root,
                 height=self.height,
                 timestamp=self.timestamp,
-                producer=self.producer,
-                vrf_proof=self.vrf_proof
+                producer_pubkey=self.producer_pubkey,
+                vrf_proof=self.vrf_proof,
+                vrf_pub_key=self.vrf_pub_key
             )
         return self._cached_header
 
     def to_dict(self):
         return {
-            "parent_hash": self.parent_hash,
-            "state_root": self.state_root,
+            "parent_hash": self.parent_hash.hex(),
+            "state_root": self.state_root.hex(),
             "transactions": [tx.to_dict() for tx in self.transactions],
-            "poh_sequence": self.poh_sequence,
+            "attestations": self.attestations,
+            "poh_sequence": [(h.hex(), e.hex() if e else None) for h, e in self.poh_sequence],
+            "poh_initial": self.poh_initial.hex(),
             "height": self.height,
-            "producer": self.producer,
-            "vrf_proof": self.vrf_proof,
+            "producer_pubkey": self.producer_pubkey.hex(),
+            "vrf_proof": self.vrf_proof.hex(),
+            "vrf_pub_key": self.vrf_pub_key.hex(),
             "timestamp": self.timestamp,
-            "signature": self.signature,
+            "signature": self.signature.hex(),
         }
 
     def get_signing_data(self) -> bytes:
@@ -311,7 +332,7 @@ class Block:
         current_hash = self.header.calculate_hash()
         
         return verify_signature(
-            self.producer,
+            self.producer_pubkey,
             self.signature,
             current_hash
         )

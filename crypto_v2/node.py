@@ -39,15 +39,19 @@ class BlockchainNode:
         logger.info(f"Initializing blockchain at {config.database.path}")
         self.blockchain = Blockchain(
             db_path=config.database.path,
-            chain_id=config.chain.chain_id
+            chain_id=config.chain.chain_id,
+            monitoring_host=config.monitoring.host,
+            monitoring_port=config.monitoring.port
         )
         
         # Initialize P2P node
         logger.info(f"Initializing P2P node on {config.network.host}:{config.network.port}")
+        p2p_priv_key, p2p_pub_key = generate_key_pair()
         self.p2p_node = P2PNode(
             host=config.network.host,
             port=config.network.port,
             blockchain=self.blockchain,
+            key_pair={'priv_key': p2p_priv_key, 'pub_key': p2p_pub_key},
             initial_peers=config.network.initial_peers,
             max_peers=config.network.max_peers
         )
@@ -132,13 +136,17 @@ class BlockchainNode:
 def load_or_generate_keys(keys_dir: Path):
     """Load existing keys or generate new ones."""
     import pickle
-    
+    from cryptography.hazmat.primitives import serialization
+
     keys_file = keys_dir / "validator_keys.pkl"
     
     if keys_file.exists():
         logger.info(f"Loading existing keys from {keys_file}")
         with open(keys_file, 'rb') as f:
-            return pickle.load(f)
+            priv_key_pem, pub_key_pem, vrf_priv, vrf_pub = pickle.load(f)
+            priv_key = serialization.load_pem_private_key(priv_key_pem, password=None)
+            pub_key = serialization.load_pem_public_key(pub_key_pem)
+            return (priv_key, pub_key, vrf_priv, vrf_pub)
     else:
         logger.info("Generating new validator keys...")
         priv_key, pub_key = generate_key_pair()
@@ -169,6 +177,7 @@ async def main():
     parser.add_argument('--validator', action='store_true',
                        help='Run in validator mode')
     parser.add_argument('--port', type=int, help='P2P port')
+    parser.add_argument('--monitoring-port', type=int, help='Monitoring port')
     parser.add_argument('--peer', action='append', 
                        help='Initial peer (format: host:port)')
     
@@ -186,6 +195,11 @@ async def main():
     
     if args.port:
         config.network.port = args.port
+    
+    if args.monitoring_port:
+        config.monitoring.port = args.monitoring_port
+
+    logger.info(f"Configured monitoring with host={config.monitoring.host} and port={config.monitoring.port}")
     
     if args.peer:
         config.network.initial_peers = []
@@ -227,5 +241,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Exiting...")
         sys.exit(0)

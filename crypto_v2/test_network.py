@@ -28,6 +28,7 @@ from crypto_v2.chain import Blockchain, TOKEN_UNIT
 from crypto_v2.crypto import generate_key_pair, serialize_public_key, public_key_to_address
 from crypto_v2.poh import PoHRecorder
 from crypto_v2.db import DB
+from crypto_v2.trie import BLANK_ROOT
 import tempfile
 import shutil
 
@@ -37,6 +38,28 @@ def blockchain():
     """Create a temporary blockchain for testing."""
     temp_dir = tempfile.mkdtemp()
     db = DB(temp_dir)
+    
+    # Manually create and store a genesis block
+    genesis = Block(
+        parent_hash=b'\x00' * 32,
+        state_root=BLANK_ROOT,
+        transactions=[],
+        poh_sequence=[],
+        poh_initial=b'\x00' * 32,
+        height=0,
+        producer_pubkey=b'genesis',
+        vrf_proof=b'genesis',
+        vrf_pub_key=b'genesis',
+        timestamp=0,
+        signature=b'genesis_signature'
+    )
+    
+    # Store the block and set it as head
+    block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
+    db.put(genesis.hash, block_data)
+    db.put(b'height:0', genesis.hash)
+    db.put(b'head', genesis.hash)
+
     chain = Blockchain(db=db, chain_id=1)
     yield chain
     db.close()
@@ -46,12 +69,21 @@ def blockchain():
 @pytest.fixture
 def p2p_node(blockchain):
     """Create a P2P node for testing."""
+    # P2PNode needs a signing key-pair (used by the block producer)
+    priv, pub = generate_key_pair()
+    key_pair = {
+        "priv_key": priv,
+        "pub_key_pem": serialize_public_key(pub),
+        "vrf_priv_key": b"dummy_vrf_priv",   # not used in unit tests
+        "vrf_pub_key": b"dummy_vrf_pub",
+    }
     node = P2PNode(
-        host='127.0.0.1',
+        host="127.0.0.1",
         port=9000,
         blockchain=blockchain,
+        key_pair=key_pair,
         initial_peers=[],
-        max_peers=MAX_PEERS
+        max_peers=MAX_PEERS,
     )
     return node
 
@@ -117,14 +149,14 @@ class TestRateLimiting:
     
     def test_rate_limiter_allows_initial_requests(self):
         """Rate limiter allows requests within limit."""
-        limiter = RateLimiter(max_rate=10, window=60)
+        limiter = RateLimiter(capacity=10, leak_rate=10/60)
         
         for _ in range(10):
             assert limiter.allow() == True
     
     def test_rate_limiter_blocks_excess_requests(self):
         """Rate limiter blocks requests exceeding limit."""
-        limiter = RateLimiter(max_rate=10, window=60)
+        limiter = RateLimiter(capacity=10, leak_rate=10/60)
         
         # Use up the quota
         for _ in range(10):
@@ -135,7 +167,7 @@ class TestRateLimiting:
     
     def test_rate_limiter_resets_after_window(self):
         """Rate limiter resets after time window."""
-        limiter = RateLimiter(max_rate=10, window=0.1)  # 100ms window
+        limiter = RateLimiter(capacity=10, leak_rate=10/0.1)  # 100ms window
         
         # Use up quota
         for _ in range(10):
@@ -502,9 +534,11 @@ class TestNewBlockPropagation:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=poh.sequence[0][0],
             height=latest.height + 1,
-            producer=pub_key_pem,
+            producer_pubkey=pub_key_pem,
             vrf_proof=b'test',
+            vrf_pub_key=b'test_vrf_key',
             timestamp=time.time()
         )
         block.sign_block(priv_key)
@@ -536,9 +570,11 @@ class TestNewBlockPropagation:
             'state_root': b'\x00' * 32,
             'transactions': [],
             'poh_sequence': [(b'\x00' * 32, None)],
+            'poh_initial': b'\x00' * 32,
             'height': 1,
-            'producer': 'test',
+            'producer_pubkey': b'test',
             'vrf_proof': b'test',
+            'vrf_pub_key': b'test',
             'timestamp': time.time(),
             'signature': b'test'
         }

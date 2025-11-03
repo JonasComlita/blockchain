@@ -22,7 +22,7 @@ from crypto_v2.crypto import (
 )
 from crypto_v2.db import DB
 from crypto_v2.poh import PoHRecorder
-from crypto_v2.trie import Trie
+from crypto_v2.trie import Trie, BLANK_ROOT
 
 
 @pytest.fixture
@@ -30,6 +30,28 @@ def blockchain():
     """Create a temporary blockchain for testing."""
     temp_dir = tempfile.mkdtemp()
     db = DB(temp_dir)
+    
+    # Manually create and store a genesis block
+    genesis = Block(
+        parent_hash=b'\x00' * 32,
+        state_root=BLANK_ROOT,
+        transactions=[],
+        poh_sequence=[],
+        poh_initial=b'\x00' * 32,
+        height=0,
+        producer_pubkey=b'genesis',
+        vrf_proof=b'genesis',
+        vrf_pub_key=b'genesis',
+        timestamp=0,
+        signature=b'genesis_signature'
+    )
+    
+    # Store the block and set it as head
+    block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
+    db.put(genesis.hash, block_data)
+    db.put(b'height:0', genesis.hash)
+    db.put(b'head', genesis.hash)
+
     chain = Blockchain(db=db, chain_id=1)
     yield chain
     db.close()
@@ -80,6 +102,8 @@ def valid_block(blockchain, validator_account):
     
     # Create PoH sequence
     parent_poh_hash = latest.poh_sequence[-1][0] if latest.poh_sequence else latest.hash
+    if isinstance(parent_poh_hash, str):
+        parent_poh_hash = bytes.fromhex(parent_poh_hash)
     poh = PoHRecorder(parent_poh_hash)
     poh.tick()
     
@@ -91,9 +115,11 @@ def valid_block(blockchain, validator_account):
         state_root=blockchain.state_trie.root_hash,  # Now correct after validator setup
         transactions=[],
         poh_sequence=poh.sequence,
+        poh_initial=parent_poh_hash,
         height=latest.height + 1,
-        producer=validator_account['pub_key_pem'],
+        producer_pubkey=validator_account['pub_key_pem'],
         vrf_proof=vrf_proof,
+        vrf_pub_key=validator_account['vrf_pub'].encode(),
         timestamp=time.time()
     )
     
@@ -122,9 +148,11 @@ class TestParentHashValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=b'test',
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time(),
             signature=b'test'
         )
@@ -146,9 +174,11 @@ class TestParentHashValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 2,  # Skipped height
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -168,9 +198,11 @@ class TestParentHashValidation:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=latest.hash,
             height=latest.height,  # Same height as parent
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -199,9 +231,11 @@ class TestParentHashValidation:
                 state_root=blockchain.state_trie.root_hash,
                 transactions=[],
                 poh_sequence=poh.sequence,
+                poh_initial=initial_hash,
                 height=latest.height + 1,
-                producer=validator_account['pub_key_pem'],
+                producer_pubkey=validator_account['pub_key_pem'],
                 vrf_proof=vrf_proof,
+                vrf_pub_key=validator_account['vrf_pub'].encode(),
                 timestamp=time.time() + i
             )
             block.sign_block(validator_account['priv_key'])
@@ -276,9 +310,11 @@ class TestBlockSizeLimits:
             state_root=temp_trie.root_hash,
             transactions=transactions,
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -322,9 +358,11 @@ class TestBlockSizeLimits:
             state_root=latest.state_root,
             transactions=transactions,
             poh_sequence=poh.sequence,
+            poh_initial=latest.hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -369,9 +407,11 @@ class TestBlockSizeLimits:
             state_root=latest.state_root,
             transactions=transactions,
             poh_sequence=poh.sequence,
+            poh_initial=latest.hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -401,9 +441,11 @@ class TestTimestampValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time() + 1  # 1 second in future
         )
         block.sign_block(validator_account['priv_key'])
@@ -424,9 +466,11 @@ class TestTimestampValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=latest.timestamp - 1  # Before parent
         )
         block.sign_block(validator_account['priv_key'])
@@ -455,9 +499,11 @@ class TestTimestampValidation:
                 state_root=blockchain.state_trie.root_hash,
                 transactions=[],
                 poh_sequence=poh.sequence,
+                poh_initial=initial_hash,
                 height=latest.height + 1,
-                producer=validator_account['pub_key_pem'],
+                producer_pubkey=validator_account['pub_key_pem'],
                 vrf_proof=vrf_proof,
+                vrf_pub_key=validator_account['vrf_pub'].encode(),
                 timestamp=latest.timestamp + 1 + i
             )
             block.sign_block(validator_account['priv_key'])
@@ -517,9 +563,11 @@ class TestStateRootValidation:
             state_root=temp_trie.root_hash,  # Correct state root
             transactions=[tx],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -541,9 +589,11 @@ class TestStateRootValidation:
             state_root=b'\xff' * 32,  # Wrong state root
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -574,9 +624,11 @@ class TestProducerValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=non_val_pem,  # Not a validator
+            producer_pubkey=non_val_pem,  # Not a validator
             vrf_proof=b'test',
+            vrf_pub_key=b'test',
             timestamp=time.time()
         )
         block.sign_block(non_val_priv)
@@ -596,9 +648,11 @@ class TestProducerValidation:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=latest.hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         # Don't sign
@@ -632,9 +686,11 @@ class TestProofOfHistoryValidation:
             state_root=blockchain.state_trie.root_hash,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -693,9 +749,11 @@ class TestProofOfHistoryValidation:
             state_root=temp_trie.root_hash,
             transactions=transactions,
             poh_sequence=poh.sequence,
+            poh_initial=initial_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -737,9 +795,11 @@ class TestTransactionValidation:
             state_root=latest.state_root,
             transactions=[tx],
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -782,9 +842,11 @@ class TestTransactionValidation:
             state_root=latest.state_root,
             transactions=transactions,
             poh_sequence=poh.sequence,
+            poh_initial=parent_poh_hash,
             height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
+            producer_pubkey=validator_account['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator_account['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator_account['priv_key'])
@@ -794,106 +856,6 @@ class TestTransactionValidation:
         blockchain.state_trie = temp_trie
         
         assert blockchain.add_block(block) == False
-
-
-class TestGenesisBlock:
-    """Test genesis block special handling."""
-
-
-class TestTransactionValidation:
-    """Test transaction validation within blocks."""
-    
-    def test_invalid_transaction_rejected(self, blockchain, validator_account):
-        """Block with invalid transaction is rejected."""
-        latest = blockchain.get_latest_block()
-        
-        # Create invalid transaction (wrong chain ID)
-        tx = Transaction(
-            sender_public_key=validator_account['pub_key_pem'],
-            tx_type='TRANSFER',
-            data={
-                'to': validator_account['address'].hex(),
-                'amount': 100 * TOKEN_UNIT,
-                'token_type': 'native'
-            },
-            nonce=0,
-            fee=1000,
-            chain_id=999  # Wrong chain ID
-        )
-        tx.sign(validator_account['priv_key'])
-        
-        parent_poh_hash = latest.poh_sequence[-1][0] if latest.poh_sequence else latest.hash
-        poh = PoHRecorder(parent_poh_hash)
-        poh.record(tx.id)
-        poh.tick()
-        
-        vrf_proof, _ = vrf_prove(validator_account['vrf_priv'], latest.hash)
-        
-        block = Block(
-            parent_hash=latest.hash,
-            state_root=latest.state_root,
-            transactions=[tx],
-            poh_sequence=poh.sequence,
-            height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
-            vrf_proof=vrf_proof,
-            timestamp=time.time()
-        )
-        block.sign_block(validator_account['priv_key'])
-        
-        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        with pytest.raises(ValidationError):
-            blockchain._process_transaction(tx, temp_trie)
-        
-        assert blockchain.add_block(block) == False
-        
-    def test_duplicate_transaction_rejected(self, blockchain, validator_account):
-        """Block with duplicate transaction is rejected."""
-        latest = blockchain.get_latest_block()
-        
-        tx = Transaction(
-            sender_public_key=validator_account['pub_key_pem'],
-            tx_type='TRANSFER',
-            data={
-                'to': validator_account['address'].hex(),
-                'amount': 100 * TOKEN_UNIT,
-                'token_type': 'native'
-            },
-            nonce=0,
-            fee=1000,
-            chain_id=1
-        )
-        tx.sign(validator_account['priv_key'])
-        
-        # Same transaction twice
-        transactions = [tx, tx]
-        
-        parent_poh_hash = latest.poh_sequence[-1][0] if latest.poh_sequence else latest.hash
-        poh = PoHRecorder(parent_poh_hash)
-        poh.tick()
-        
-        vrf_proof, _ = vrf_prove(validator_account['vrf_priv'], latest.hash)
-        
-        block = Block(
-            parent_hash=latest.hash,
-            state_root=latest.state_root,
-            transactions=transactions,
-            poh_sequence=poh.sequence,
-            height=latest.height + 1,
-            producer=validator_account['pub_key_pem'],
-            vrf_proof=vrf_proof,
-            timestamp=time.time()
-        )
-        block.sign_block(validator_account['priv_key'])
-        
-        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
-        blockchain._process_transaction(tx, temp_trie)
-        blockchain.state_trie = temp_trie
-        
-        assert blockchain.add_block(block) == False
-
-
-class TestGenesisBlock:
     """Test genesis block special handling."""
     
     def test_genesis_block_properties(self, blockchain):
@@ -904,7 +866,7 @@ class TestGenesisBlock:
         assert genesis.height == 0
         assert genesis.parent_hash == b'\x00' * 32
         assert len(genesis.transactions) == 0
-        assert genesis.producer == b'genesis'
+        assert genesis.producer_pubkey == b'genesis'
     
     def test_cannot_add_another_genesis(self, blockchain):
         """Cannot add another block at height 0."""

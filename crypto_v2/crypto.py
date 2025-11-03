@@ -47,16 +47,16 @@ def generate_key_pair() -> tuple[ec.EllipticCurvePrivateKey, ec.EllipticCurvePub
     public_key = private_key.public_key()
     return private_key, public_key
 
-def serialize_public_key(public_key: ec.EllipticCurvePublicKey) -> str:
-    """Serializes a public key object into PEM format (string)."""
+def serialize_public_key(public_key: ec.EllipticCurvePublicKey) -> bytes:
+    """Serializes a public key to a PEM formatted byte string."""
     return public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode('utf-8')
+    )
 
-def deserialize_public_key(pem_data: str) -> ec.EllipticCurvePublicKey:
-    """Deserializes a public key from a PEM formatted string."""
-    return serialization.load_pem_public_key(pem_data.encode('utf-8'))
+def deserialize_public_key(pem_data: bytes) -> ec.EllipticCurvePublicKey:
+    """Deserializes a public key from a PEM formatted byte string."""
+    return serialization.load_pem_public_key(pem_data)
 
 def public_key_to_address(public_key_pem: str) -> bytes:
     """Derives a blockchain address from a public key PEM string."""

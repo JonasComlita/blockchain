@@ -127,9 +127,11 @@ class ValidatorNode:
                 state_root=new_state_root,
                 transactions=processed_txs,
                 poh_sequence=poh_recorder.sequence,
+                poh_initial=poh_recorder.sequence[0][0] if poh_recorder.sequence else latest_block.hash,
                 height=latest_block.height + 1,
-                producer=self.validator_public_key_pem,
+                producer_pubkey=self.validator_public_key_pem,
                 vrf_proof=vrf_proof,
+                vrf_pub_key=self.p2p_node.vrf_public_key.encode(),
                 timestamp=time.time()
             )
             

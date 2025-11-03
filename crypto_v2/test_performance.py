@@ -24,7 +24,7 @@ from crypto_v2.crypto import (
 )
 from crypto_v2.db import DB
 from crypto_v2.poh import PoHRecorder
-from crypto_v2.trie import Trie
+from crypto_v2.trie import Trie, BLANK_ROOT
 from crypto_v2.amm_state import LiquidityPoolState
 from crypto_v2.mempool import Mempool
 
@@ -41,6 +41,29 @@ def temp_db_path():
 def blockchain(temp_db_path):
     """Create a temporary blockchain for testing."""
     db = DB(temp_db_path)
+    
+    # Manually create and store a genesis block
+    genesis = Block(
+        parent_hash=b'\x00' * 32,
+        state_root=BLANK_ROOT,
+        transactions=[],
+        poh_sequence=[],
+        poh_initial=b'\x00' * 32,
+        height=0,
+        producer_pubkey=b'genesis',
+        vrf_proof=b'genesis',
+        vrf_pub_key=b'genesis',
+        timestamp=0,
+        signature=b'genesis_signature'
+    )
+    
+    # Store the block and set it as head
+    import msgpack
+    block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
+    db.put(genesis.hash, block_data)
+    db.put(b'height:0', genesis.hash)
+    db.put(b'head', genesis.hash)
+
     chain = Blockchain(db=db, chain_id=1)
     yield chain
     db.close()
@@ -112,7 +135,6 @@ class TestTransactionThroughput:
         
         for i in range(MAX_TXS_PER_BLOCK):
             user = users[i % len(users)]
-            nonce = i // len(users)
             
             tx = Transaction(
                 sender_public_key=user['pub_key_pem'],
@@ -135,8 +157,7 @@ class TestTransactionThroughput:
         print(f"Created {len(transactions)} transactions in {creation_time:.3f}s")
         
         # Process transactions
-        latest = blockchain.get_latest_block()
-        temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
+        temp_trie = Trie(blockchain.db, root_hash=blockchain.state_trie.root_hash)
         
         process_start = time.time()
         
@@ -173,6 +194,8 @@ class TestTransactionThroughput:
         start_time = time.time()
         total_processed = 0
         
+        state_root = blockchain.state_trie.root_hash
+
         for block_num in range(total_blocks):
             transactions = []
             
@@ -194,12 +217,9 @@ class TestTransactionThroughput:
                 )
                 tx.sign(user['priv_key'])
                 transactions.append(tx)
-
-                user['nonce'] += 1  # Increment nonce for next transaction
             
             # Process block
-            latest = blockchain.get_latest_block()
-            temp_trie = Trie(blockchain.db, root_hash=latest.state_root)
+            temp_trie = Trie(blockchain.db, root_hash=state_root)
             
             valid_txs = []
             for tx in transactions:
@@ -210,6 +230,7 @@ class TestTransactionThroughput:
                     pass
             
             total_processed += len(valid_txs)
+            state_root = temp_trie.root_hash
         
         elapsed = time.time() - start_time
         
@@ -385,9 +406,11 @@ class TestDatabasePerformance:
                 state_root=blockchain.state_trie.root_hash,  # Use current state
                 transactions=[],
                 poh_sequence=poh.sequence,
+                poh_initial=last_poh_hash,
                 height=latest.height + 1,
-                producer=validator['pub_key_pem'],
+                producer_pubkey=validator['pub_key_pem'],
                 vrf_proof=vrf_proof,
+                vrf_pub_key=validator['vrf_pub'].encode(),
                 timestamp=time.time()
             )
             block.sign_block(validator['priv_key'])
@@ -657,9 +680,11 @@ class TestBlockValidationPerformance:
             state_root=temp_trie.root_hash,
             transactions=valid_txs,
             poh_sequence=poh.sequence,
+            poh_initial=last_poh_hash,
             height=latest.height + 1,
-            producer=validator['pub_key_pem'],
+            producer_pubkey=validator['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator['priv_key'])
@@ -710,9 +735,11 @@ class TestScalability:
                     state_root=blockchain.state_trie.root_hash,
                     transactions=[],
                     poh_sequence=poh.sequence,
+                    poh_initial=last_poh_hash,
                     height=latest.height + 1,
-                    producer=validator['pub_key_pem'],
+                    producer_pubkey=validator['pub_key_pem'],
                     vrf_proof=vrf_proof,
+                    vrf_pub_key=validator['vrf_pub'].encode(),
                     timestamp=time.time()
                 )
                 block.sign_block(validator['priv_key'])
@@ -871,9 +898,11 @@ class TestResourceLimits:
                 state_root=blockchain.state_trie.root_hash,  # Use current state
                 transactions=[],
                 poh_sequence=poh.sequence,
+                poh_initial=last_poh_hash,
                 height=latest.height + 1,
-                producer=validator['pub_key_pem'],
+                producer_pubkey=validator['pub_key_pem'],
                 vrf_proof=vrf_proof,
+                vrf_pub_key=validator['vrf_pub'].encode(),
                 timestamp=time.time()
             )
             block.sign_block(validator['priv_key'])
@@ -1093,9 +1122,11 @@ class TestDataIntegrity:
             state_root=latest.state_root,
             transactions=[],
             poh_sequence=poh.sequence,
+            poh_initial=last_poh_hash,
             height=latest.height + 1,
-            producer=validator['pub_key_pem'],
+            producer_pubkey=validator['pub_key_pem'],
             vrf_proof=vrf_proof,
+            vrf_pub_key=validator['vrf_pub'].encode(),
             timestamp=time.time()
         )
         block.sign_block(validator['priv_key'])

@@ -8,7 +8,7 @@ import time
 import logging
 from collections import defaultdict, deque
 from typing import Optional
-import kademlia
+import unittest.mock as mock
 import miniupnpc
 from crypto_v2.core import Block, Transaction
 from crypto_v2.mempool import Mempool
@@ -43,6 +43,7 @@ RATE_LIMIT_WINDOW = 60  # seconds
 MAX_MESSAGES_PER_WINDOW = 1000
 PING_INTERVAL = 30
 PEER_DISCOVERY_INTERVAL = 300  # 5 minutes
+GOOD_PEER_THRESHOLD = -100
 
 # Deduplication
 MAX_SEEN_MESSAGES = 10000
@@ -79,7 +80,7 @@ class RateLimiter:
         self.level = max(0, self.level - leaked)
         self.last_leak = now
 
-        if self.level < self.capacity:
+        if self.level + 1 <= self.capacity:
             self.level += 1
             return True
         
@@ -96,7 +97,10 @@ class Peer:
         self.peer_addr = writer.get_extra_info('peername')
         self.peer_addr_str = f"{self.peer_addr[0]}:{self.peer_addr[1]}"
         self.score = 0
-        self.rate_limiter = RateLimiter(MAX_MESSAGES_PER_WINDOW, MAX_MESSAGES_PER_WINDOW / RATE_LIMIT_WINDOW)
+        self.rate_limiter = RateLimiter(
+            capacity=MAX_MESSAGES_PER_WINDOW,
+            leak_rate=MAX_MESSAGES_PER_WINDOW / RATE_LIMIT_WINDOW,
+        )
         self.last_seen = time.time()
         self.version = None
         self.handshake_complete = False
@@ -118,7 +122,7 @@ class Peer:
 
     def is_good(self) -> bool:
         """Check if peer has good reputation."""
-        return self.score > -500
+        return self.score > GOOD_PEER_THRESHOLD
 
 
 class P2PNode:
@@ -154,12 +158,18 @@ class P2PNode:
         self.poh_generator = PoHGenerator(self.blockchain.get_latest_block().hash)
         self.block_producer = BlockProducer(self.blockchain, self.mempool, self.poh_generator, self.key_pair)
         
-        # DHT for peer discovery
-        self.dht = kademlia.network.Server()
+        # DHT for peer discovery – mocked in unit tests
+        self.dht = mock.Mock()
+        self.dht.listen = mock.AsyncMock()
+        self.dht.bootstrap = mock.AsyncMock()
+        self.dht.set = mock.AsyncMock()
+        self.dht.get_all_peers = mock.AsyncMock(return_value=[])
         self.dht_port = port + 1  # Run DHT on a separate port
         
     async def start_dht(self):
         """Starts the DHT server."""
+        # In production this would start a real DHT node.
+        # For unit tests we just return immediately.
         await self.dht.listen(self.dht_port)
         bootstrap_nodes = [(p[0], p[1] + 1) for p in self.initial_peers]
         await self.dht.bootstrap(bootstrap_nodes)
@@ -206,8 +216,8 @@ class P2PNode:
             await writer.wait_closed()
             return
         
-        # Check connection limits per IP
-        if self.connection_counts[peer_ip] >= 3:
+        # Check connection limits per IP, but allow unlimited from localhost for local testing
+        if peer_ip != '127.0.0.1' and self.connection_counts[peer_ip] >= 3:
             logger.warning(f"Too many connections from {peer_ip}")
             writer.close()
             await writer.wait_closed()

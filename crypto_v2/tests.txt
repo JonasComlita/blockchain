@@ -296,100 +296,93 @@ test_performance.py passed
 
 -----------------------------
 
-2. Economic & Game Theory ValidationYour system has:Bonding curve
-Buyback & burn
-Game fee oracle
-AMM with walled garden ($1 min, 50% max)
+crypto_v2/test_performance.py::TestTransactionThroughput::test_max_transactions_per_block_performance Created 1000 transactions in 0.040s
+Processed 1000 transactions in 0.616s
+Throughput: 1623.4 tx/s
+PASSED
+crypto_v2/test_performance.py::TestTransactionThroughput::test_sustained_transaction_rate Processed 1000 transactions in 0.617s
+Average throughput: 1620.7 tx/s
+Blocks per second: 16.21
+PASSED
+crypto_v2/test_performance.py::TestAMMPerformance::test_high_frequency_swaps Processed 100 swaps in 0.064s
+Swap throughput: 1552.0 swaps/s
+PASSED
+crypto_v2/test_performance.py::TestAMMPerformance::test_amm_calculation_performance Performed 10000 swap calculations in 0.003s
+Calculations per second: 3153137.9
+PASSED
+crypto_v2/test_performance.py::TestDatabasePerformance::test_state_trie_write_performance Performed 1000 trie writes in 0.309s
+Writes per second: 3235.4
+PASSED
+crypto_v2/test_performance.py::TestDatabasePerformance::test_state_trie_read_performance Performed 1000 trie reads in 0.067s
+Reads per second: 15021.1
+PASSED
+crypto_v2/test_performance.py::TestDatabasePerformance::test_block_storage_retrieval_performance Stored 100 blocks in 0.063s
+Storage rate: 1594.7 blocks/s
+Retrieved 100 blocks in 0.003s
+Retrieval rate: 30386.9 blocks/s
+PASSED
+crypto_v2/test_performance.py::TestMemoryUsage::test_memory_usage_with_large_state Initial memory: 71.42 MB
+After 1000 accounts: 71.42 MB (+0.00 MB)
+After 2000 accounts: 71.77 MB (+0.35 MB)
+After 3000 accounts: 73.79 MB (+2.37 MB)
+After 4000 accounts: 75.93 MB (+4.50 MB)
+After 5000 accounts: 78.13 MB (+6.71 MB)
+After 6000 accounts: 80.38 MB (+8.96 MB)
+After 7000 accounts: 82.67 MB (+11.25 MB)
+After 8000 accounts: 85.01 MB (+13.59 MB)
+After 9000 accounts: 87.37 MB (+15.95 MB)
+After 10000 accounts: 89.77 MB (+18.35 MB)
+Final memory: 89.77 MB
+Memory per account: 1.88 KB
+PASSED
+crypto_v2/test_performance.py::TestMemoryUsage::test_mempool_memory_limits Added 1000 transactions to mempool
+Memory usage: 0.21 MB
+Memory per transaction: 0.21 KB
+PASSED
+crypto_v2/test_performance.py::TestCryptographicPerformance::test_signature_generation_performance Generated 1000 signatures in 0.023s
+Signatures per second: 42784.6
+PASSED
+crypto_v2/test_performance.py::TestCryptographicPerformance::test_signature_verification_performance Verified 1000 signatures in 0.083s
+Verifications per second: 12038.7
+PASSED
+crypto_v2/test_performance.py::TestCryptographicPerformance::test_hash_performance Generated 10000 hashes in 0.043s
+Hashes per second: 234384.1
+PASSED
+crypto_v2/test_performance.py::TestCryptographicPerformance::test_address_derivation_performance Derived 1000 addresses in 0.016s
+Derivations per second: 61095.1
+PASSED
+crypto_v2/test_performance.py::TestBlockValidationPerformance::test_validate_block_with_many_transactions Validated block with 500 transactions in 0.308s
+Validation rate: 1625.4 tx/s
+PASSED
+crypto_v2/test_performance.py::TestScalability::test_chain_growth_performance Added 10 blocks (total 10): 0.009s
+Added 40 blocks (total 50): 0.031s
+Added 50 blocks (total 100): 0.033s
+PASSED
+crypto_v2/test_performance.py::TestScalability::test_large_pool_swap_performance Pool size 1000:1000 - 1000 swaps in 0.000s (4271185.3 swaps/s)
+Pool size 10000:10000 - 1000 swaps in 0.000s (3435138.4 swaps/s)
+Pool size 100000:100000 - 1000 swaps in 0.000s (3238844.8 swaps/s)
+PASSED
+crypto_v2/test_performance.py::TestStressConditions::test_maximum_block_size Processed 0 large transactions in 0.003s
+PASSED
+crypto_v2/test_performance.py::TestStressConditions::test_rapid_account_creation Created 1000 accounts in 0.365s
+Account creation rate: 2737.5 accounts/s
+PASSED
+crypto_v2/test_performance.py::TestResourceLimits::test_database_size_growth Initial database size: 0.00 MB
+Final database size: 0.13 MB
+Growth: 0.13 MB for 100 blocks
+Average size per block: 0.0013 MB
+PASSED
+crypto_v2/test_performance.py::TestConcurrency::test_concurrent_account_reads Performed 100 concurrent reads in 0.010s
+Read rate: 10021.5 reads/s
+PASSED
+crypto_v2/test_performance.py::TestEdgeCases::test_zero_value_transfers Zero transfer validation: False, error: Transfer amount must be positive
+PASSED
+crypto_v2/test_performance.py::TestEdgeCases::test_maximum_nonce_value PASSED
+crypto_v2/test_performance.py::TestEdgeCases::test_minimum_swap_amounts Swap output for 1 unit input: 0
+PASSED
+crypto_v2/test_performance.py::TestEdgeCases::test_large_fee_values PASSED
+crypto_v2/test_performance.py::TestDataIntegrity::test_state_root_consistency PASSED
+crypto_v2/test_performance.py::TestDataIntegrity::test_transaction_signature_integrity PASSED
+crypto_v2/test_performance.py::TestDataIntegrity::test_block_hash_integrity PASSED
 
-Have you modeled:Token price under extreme sell pressure?
-Liquidity drain attacks?
-Validator collusion?
-Oracle manipulation?
-
-Run simulations with real user behavior models.
-
-3. Network & Consensus Stress TestingYour test_network.py uses mocks — this is fine for unit tests, but not enough.You need:Real P2P network testing with 50–100 nodes
-Partition testing
-Byzantine node simulation
-Message flood / DoS resistance
-Block propagation latency under load
-
-Use tools like libp2p testnets or custom chaos testing.
-
-4. Validator & Leader Selection (VRF)You use VRF for leader selection (is_valid_leader) — but:Is the VRF verifiably random?
-Can a validator predict when they’ll be leader?
-Is there look-ahead bias?
-
-Run statistical tests on VRF outputs.
-
-5. PoH (Proof of History) SecurityYou use PoH for ordering — but:Is the hash chain unpredictable?
-Can a malicious producer pre-mine PoH ticks?
-Is poh.tick() using secure randomness?
-
-Fuzz the PoH recorder.
-
-6. Key Management & Oracle Security
-
-Critical addresses:
-
-PAYMENTS_ORACLE_ADDRESS
-RESERVE_ADMIN_ADDRESS
-GAME_ORACLE_ADDRESS
-
-How are private keys stored?HSM?
-Multisig?
-Cold wallet?
-
-A single compromised oracle = game over.
-
-7. Upgradeability & GovernanceCan you fix a critical bug?
-Is there a governance mechanism?
-What if the bonding curve slope is wrong?
-
-You need an upgrade path.
-
-8. Monitoring, Alerting, and Incident ResponseYou need:Real-time dashboard
-Anomaly detection (e.g. sudden price crash)
-Emergency pause mechanism
-Post-mortem process
-
-9. Mainnet Dry Run (Testnet with Real Stakes)Run a public testnet with:Real users
-Real money (test tokens with value)
-Real validators
-
-Monitor for 2–4 weeks.
-
-10. Documentation & Disaster RecoveryIs the code documented?
-Do you have a runbook?
-Can you restore from a corrupted DB?
-
-Final Checklist Before DeployItem
-Done?
-All unit/integration tests pass
-Yes
-External security audit
-No
-Economic model simulation
-No
-Real P2P network testing
-No
-Public testnet with stakes
-No
-Oracle key management plan
-No
-Emergency pause mechanism
-No
-Monitoring & alerting
-No
-Upgrade path
-No
-
-Strengths (What Feels Fresh): The integrated "game economy loop"—where off-chain gameplay generates on-chain fees for buybacks/burns, 
-combined with a restricted AMM to protect liquidity from dumps—is a thoughtful evolution for sustainable GameFi. It's not just 
-"play-to-earn" hype; it's designed for long-term token deflation via gameplay. The PoH+VRF combo (inspired by Solana but customized) 
-with a bonding curve bootstrap (rare in full L1s) adds efficiency for high-throughput gaming txs. In 2025, with GameFi maturing beyond 
-2021's crash, this "closed-loop" (game → fees → burns → scarcity) feels timely and anti-exploitative.
-Limitations (Why It's Not Groundbreaking): Core mechanics are well-trodden—PoH/VRF consensus, AMMs, bonding curves, and P2E rewards 
-have been iterated on since 2018–2020. It's more polished hybrid than invention, lacking bold innovations like AI-driven oracles, 
-zero-knowledge game proofs, or cross-chain composability. No unique primitives (e.g., no novel ZK or oracle tech) stand out. 
-If deployed, it'd compete in a saturated market without a clear "killer app" beyond the game integration.
+=================================== 27 passed in 8.58s ==================================

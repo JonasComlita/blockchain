@@ -15,12 +15,12 @@ from crypto_v2.chain import (
     RESERVE_POOL_ADDRESS, OUTFLOW_RESERVE_ADDRESS,
     BONDING_CURVE_BASE_PRICE, BONDING_CURVE_SLOPE
 )
-from crypto_v2.core import Transaction
+from crypto_v2.core import Transaction, Block
 from crypto_v2.crypto import generate_key_pair, serialize_public_key, public_key_to_address
 from crypto_v2.db import DB
 from crypto_v2.amm_state import LiquidityPoolState
 from crypto_v2.tokenomics_state import TokenomicsState
-from crypto_v2.trie import Trie
+from crypto_v2.trie import Trie, BLANK_ROOT
 
 
 @pytest.fixture
@@ -28,6 +28,29 @@ def blockchain():
     """Create a temporary blockchain for testing."""
     temp_dir = tempfile.mkdtemp()
     db = DB(temp_dir)
+    
+    # Manually create and store a genesis block
+    genesis = Block(
+        parent_hash=b'\x00' * 32,
+        state_root=BLANK_ROOT,
+        transactions=[],
+        poh_sequence=[],
+        poh_initial=b'\x00' * 32,
+        height=0,
+        producer_pubkey=b'genesis',
+        vrf_proof=b'genesis',
+        vrf_pub_key=b'genesis',
+        timestamp=0,
+        signature=b'genesis_signature'
+    )
+    
+    # Store the block and set it as head
+    import msgpack
+    block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
+    db.put(genesis.hash, block_data)
+    db.put(b'height:0', genesis.hash)
+    db.put(b'head', genesis.hash)
+
     chain = Blockchain(db=db, chain_id=1)
     yield chain
     db.close()

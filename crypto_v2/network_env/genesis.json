@@ -1,0 +1,31 @@
+{
+  "initial_balances": {
+    "fa4450fca5b2fe60fd5035916d0eb34df77aa8f3": {
+      "native": 1000000000000,
+      "usd": 50000000000
+    },
+    "f0e18dd435fd6f81ce421095c9fafbe17820455d": {
+      "native": 10000000000,
+      "usd": 10000000000
+    },
+    "O4365b1e41d037f340149b145fa736a9f9fd2937f": {
+      "native": 10000000000,
+      "usd": 10000000000
+    },
+    "9576e5460dbe24710853136e0450c694827ea2a0": {
+      "native": 10000000000,
+      "usd": 10000000000
+    }
+  },
+  "initial_validators": [
+    {
+      "address": "fa4450fca5b2fe60fd5035916d0eb34df77aa8f3",
+      "stake": 500000000000
+    }
+  ],
+  "initial_oracles": [
+    "f0e18dd435fd6f81ce421095c9fafbe17820455d",
+    "O4365b1e41d037f340149b145fa736a9f9fd2937f",
+    "9576e5460dbe24710853136e0450c694827ea2a0"
+  ]
+}
