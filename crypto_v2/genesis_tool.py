@@ -9,13 +9,21 @@ import json
 import time
 import argparse
 from pathlib import Path
+import msgpack
+from cryptography.hazmat.primitives import serialization
 
-from crypto_v2.chain import Blockchain
+from crypto_v2.chain import (
+    Blockchain,
+    TOKEN_UNIT,
+    VALIDATOR_SET_ADDRESS,
+    ORACLE_STAKE_ADDRESS,
+    MULTISIG_CONFIG_ADDRESS,
+    ORACLE_BOND,
+)
 from crypto_v2.core import Block
 from crypto_v2.db import DB
 from crypto_v2.trie import Trie
 from crypto_v2.crypto import generate_key_pair, serialize_public_key, public_key_to_address
-from crypto_v2.chain import TOKEN_UNIT
 
 def create_genesis_block(config_path: str, output_db_path: str):
     """
@@ -48,27 +56,41 @@ def create_genesis_block(config_path: str, output_db_path: str):
                 'usd': int(account_info.get('balance_usd', 0)) * TOKEN_UNIT,
             },
             'nonce': 0,
-            'storage': {},
-            'vrf_pub_key': None,
+            'lp_tokens': 0,
         }
-        state_trie.set(address, json.dumps(account_state).encode('utf-8'))
+        state_trie.set(b"ACCOUNT:" + address, msgpack.packb(account_state, use_bin_type=True))
     print(f"Processed {len(config.get('pre_mined_accounts', []))} accounts.")
 
     # --- 2. Process Initial Validators ---
     print("Processing initial validators...")
     validator_set = {}
     for validator_info in config.get('initial_validators', []):
-        address = validator_info['address']
+        address = bytes.fromhex(validator_info['address'])
         stake = int(validator_info['stake']) * TOKEN_UNIT
-        validator_set[address] = stake
+        validator_set[address.hex()] = {
+            'stake': stake,
+            'vrf_pub_key': validator_info.get('vrf_pub_key') # Assuming this is in the config
+        }
     
-    state_trie.set(b'validators', json.dumps(validator_set).encode('utf-8'))
+    state_trie.set(VALIDATOR_SET_ADDRESS, msgpack.packb(validator_set, use_bin_type=True))
     print(f"Processed {len(validator_set)} validators.")
 
     # --- 3. Process Oracles and Admins ---
     print("Processing oracles and admins...")
-    state_trie.set(b'oracles', json.dumps(config.get('oracles', [])).encode('utf-8'))
-    state_trie.set(b'admins', json.dumps(config.get('admins', [])).encode('utf-8'))
+    
+    oracle_stakes = {}
+    for oracle_pubkey_hex in config.get('oracles', []):
+        oracle_pubkey = bytes.fromhex(oracle_pubkey_hex)
+        oracle_stakes[oracle_pubkey] = ORACLE_BOND
+    state_trie.set(ORACLE_STAKE_ADDRESS, msgpack.packb(oracle_stakes, use_bin_type=True))
+    print(f"Processed {len(oracle_stakes)} oracles.")
+
+    multisig_config = {
+        'required_sigs': config.get('multisig_required_sigs', 2),
+        'authorized_signers': [bytes.fromhex(pk) for pk in config.get('admins', [])]
+    }
+    state_trie.set(MULTISIG_CONFIG_ADDRESS, msgpack.packb(multisig_config, use_bin_type=True))
+    print(f"Processed {len(multisig_config['authorized_signers'])} admins for multi-sig.")
 
     # --- 4. Create the Genesis Block ---
     genesis_block = Block(
@@ -86,7 +108,6 @@ def create_genesis_block(config_path: str, output_db_path: str):
     )
 
     # --- 5. Initialize the Blockchain with the Genesis Block ---
-    import msgpack
     db.put(b'height:0', genesis_block.hash)
     db.put(b'block:' + genesis_block.hash, msgpack.packb(genesis_block.to_dict(), use_bin_type=True))
     db.put(b'head', genesis_block.hash)
@@ -102,10 +123,10 @@ def generate_sample_config(output_path: str):
     """Generates a sample genesis.json configuration file."""
     # Generate some sample keys for demonstration
     priv1, pub1 = generate_key_pair()
-    addr1 = public_key_to_address(serialize_public_key(pub1)).hex()
+    addr1 = public_key_to_address(pub1).hex()
 
     priv2, pub2 = generate_key_pair()
-    addr2 = public_key_to_address(serialize_public_key(pub2)).hex()
+    addr2 = public_key_to_address(pub2).hex()
 
     config = {
         "pre_mined_accounts": [
@@ -113,10 +134,11 @@ def generate_sample_config(output_path: str):
             {"address": addr2, "balance_native": 500000, "balance_usd": 100000}
         ],
         "initial_validators": [
-            {"address": addr1, "stake": 50000}
+            {"address": addr1, "stake": 50000, "vrf_pub_key": "sample_vrf_key_1"}
         ],
-        "oracles": [addr2],
-        "admins": [addr1]
+        "oracles": [pub2.hex()],
+        "admins": [pub1.hex()],
+        "multisig_required_sigs": 1
     }
 
     with open(output_path, 'w') as f:
@@ -125,8 +147,8 @@ def generate_sample_config(output_path: str):
     print(f"\nGenerated sample genesis configuration at: {output_path}")
     print("Please review and edit this file before generating the genesis block.")
     print("\nSample private keys (DO NOT USE IN PRODUCTION):")
-    print(f"  - Address {addr1}: {priv1.private_bytes(...)}") # Simplified for brevity
-    print(f"  - Address {addr2}: {priv2.private_bytes(...)}")
+    print(f"  - Address {addr1}: {priv1.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8, encryption_algorithm=serialization.NoEncryption()).hex()}") # Simplified for brevity
+    print(f"  - Address {addr2}: {priv2.private_bytes(encoding=serialization.Encoding.PEM, format=serialization.PrivateFormat.PKCS8, encryption_algorithm=serialization.NoEncryption()).hex()}")
 
 
 if __name__ == '__main__':

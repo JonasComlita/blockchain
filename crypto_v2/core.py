@@ -31,7 +31,9 @@ class Transaction:
                  fee: int,
                  signature: Optional[bytes] = None,
                  timestamp: Optional[float] = None,
-                 chain_id: Optional[int] = 1):  # Replay protection
+                 chain_id: Optional[int] = 1,
+                 gas_limit: Optional[int] = 1_000_000):  # Replay protection
+        self.gas_limit = gas_limit
         self.sender_public_key = sender_public_key
         self.tx_type = tx_type
         self.data = data
@@ -40,6 +42,21 @@ class Transaction:
         self.timestamp = timestamp or time.time()
         self.signature = signature
         self.chain_id = chain_id
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Creates a Transaction object from a dictionary."""
+        return cls(
+            sender_public_key=data["sender_public_key"],
+            tx_type=data["tx_type"],
+            data=data["data"],
+            nonce=data["nonce"],
+            fee=data["fee"],
+            signature=bytes.fromhex(data.get("signature")) if data.get("signature") else None,
+            timestamp=data.get("timestamp"),
+            chain_id=data.get("chain_id"),
+            gas_limit=data.get("gas_limit"),
+        )
 
     def to_dict(self, include_signature=True):
         data = {
@@ -100,59 +117,91 @@ class Transaction:
         if self.tx_type == 'TRANSFER':
             if 'to' not in self.data or 'amount' not in self.data:
                 return False, "TRANSFER requires 'to' and 'amount'"
-            try:
-                if int(self.data['amount']) <= 0:
-                    return False, "Transfer amount must be positive"
-            except Exception:
-                return False, "Invalid transfer amount"
+            if not isinstance(self.data.get('amount'), int) or self.data['amount'] <= 0:
+                return False, "Transfer amount must be a positive integer"
                 
-        elif self.tx_type == 'ATTEST':
-            if 'block_hash' not in self.data:
-                return False, "ATTEST requires 'block_hash'"
-            
-        elif self.tx_type == 'PURCHASE':
-            if 'usd_amount' not in self.data:
-                return False, "PURCHASE requires 'usd_amount'"
-            try:
-                if int(self.data['usd_amount']) <= 0:
-                    return False, "Purchase amount must be positive"
-            except Exception:
-                return False, "Invalid purchase amount"
-            
+        elif self.tx_type == 'MINT_USD_TOKEN':
+            if 'to' not in self.data or 'amount' not in self.data:
+                return False, "MINT_USD_TOKEN requires 'to' and 'amount'"
+            if not isinstance(self.data.get('amount'), int) or self.data['amount'] <= 0:
+                return False, "Mint amount must be a positive integer"
+
         elif self.tx_type == 'GAME_FEE':
-            if 'game_id' not in self.data or 'score' not in self.data:
-                return False, "GAME_FEE requires 'game_id' and 'score'"
-            try:
-                int(self.data['score'])
-            except (ValueError, TypeError):
-                return False, "Invalid score format"
-                
+            if 'amount' not in self.data:
+                return False, "GAME_FEE requires 'amount'"
+            if not isinstance(self.data.get('amount'), int) or self.data['amount'] <= 0:
+                return False, "Game fee amount must be a positive integer"
+
         elif self.tx_type == 'STAKE':
-            if 'amount' not in self.data or 'vrf_pub_key' not in self.data:
-                return False, "STAKE requires 'amount' and 'vrf_pub_key'"
-            try:
-                if int(self.data['amount']) <= 0:
-                    return False, "Stake amount must be positive"
-            except Exception:
-                return False, "Invalid stake amount"
-                
+            if 'amount' not in self.data:
+                return False, "STAKE requires 'amount'"
+            if not isinstance(self.data.get('amount'), int) or self.data['amount'] <= 0:
+                return False, "Stake amount must be a positive integer"
+
         elif self.tx_type == 'UNSTAKE':
             if 'amount' not in self.data:
                 return False, "UNSTAKE requires 'amount'"
-            try:
-                if int(self.data['amount']) <= 0:
-                    return False, "Unstake amount must be positive"
-            except Exception:
-                return False, "Invalid unstake amount"
-                
+            if not isinstance(self.data.get('amount'), int) or self.data['amount'] <= 0:
+                return False, "Unstake amount must be a positive integer"
+
+        elif self.tx_type == 'BOND_MINT':
+            if 'amount_in' not in self.data:
+                return False, "BOND_MINT requires 'amount_in'"
+            if not isinstance(self.data.get('amount_in'), int) or self.data['amount_in'] <= 0:
+                return False, "Bond amount must be a positive integer"
+
+        elif self.tx_type == 'RESERVE_BURN':
+            if 'amount_in' not in self.data:
+                return False, "RESERVE_BURN requires 'amount_in'"
+            if not isinstance(self.data.get('amount_in'), int) or self.data['amount_in'] <= 0:
+                return False, "Burn amount must be a positive integer"
+
+        elif self.tx_type == 'DEPLOY_RESERVE_LIQUIDITY':
+            # No specific data fields required, just sender verification
+            pass
+
+        elif self.tx_type == 'SWAP':
+            if 'amount_in' not in self.data or 'token_in' not in self.data or 'min_amount_out' not in self.data:
+                return False, "SWAP requires 'amount_in', 'token_in', and 'min_amount_out'"
+            if self.data['token_in'] not in ['native', 'usd']:
+                return False, "Invalid token_in for swap"
+            if not isinstance(self.data.get('amount_in'), int) or self.data['amount_in'] <= 0:
+                return False, "Swap amount_in must be a positive integer"
+            if not isinstance(self.data.get('min_amount_out'), int) or self.data['min_amount_out'] < 0:
+                return False, "Swap min_amount_out must be a non-negative integer"
+
+        elif self.tx_type == 'ADD_LIQUIDITY':
+            if 'native_amount' not in self.data or 'usd_amount' not in self.data:
+                return False, "ADD_LIQUIDITY requires 'native_amount' and 'usd_amount'"
+            if not isinstance(self.data.get('native_amount'), int) or self.data['native_amount'] <= 0:
+                return False, "Native amount must be a positive integer"
+            if not isinstance(self.data.get('usd_amount'), int) or self.data['usd_amount'] <= 0:
+                return False, "USD amount must be a positive integer"
+
+        elif self.tx_type == 'REMOVE_LIQUIDITY':
+            if 'lp_amount' not in self.data:
+                return False, "REMOVE_LIQUIDITY requires 'lp_amount'"
+            if not isinstance(self.data.get('lp_amount'), int) or self.data['lp_amount'] <= 0:
+                return False, "LP amount must be a positive integer"
+
+        elif self.tx_type == 'UPDATE_MULTISIG_CONFIG':
+            if 'required_sigs' not in self.data or 'authorized_signers' not in self.data:
+                return False, "UPDATE_MULTISIG_CONFIG requires 'required_sigs' and 'authorized_signers'"
+            if not isinstance(self.data.get('required_sigs'), int) or self.data['required_sigs'] <= 0:
+                return False, "required_sigs must be a positive integer"
+            if not isinstance(self.data.get('authorized_signers'), list):
+                return False, "authorized_signers must be a list"
+
         elif self.tx_type == 'SLASH':
-            if 'header1' not in self.data or 'header2' not in self.data:
-                return False, "SLASH requires 'header1' and 'header2'"
+            if 'validator_address' not in self.data:
+                return False, "SLASH requires 'validator_address'"
+                
         elif self.tx_type in (
             "ORACLE_SUBMIT", "ORACLE_REGISTER",
-            "ORACLE_UNREGISTER", "ORACLE_NEW_ROUND"
+            "ORACLE_UNREGISTER_REQUEST", "ORACLE_UNREGISTER_EXECUTE",
+            "ORACLE_NEW_ROUND"
         ):
-            # All oracle txs need a valid sender public key
+            # Validation for these is handled more deeply in the chain logic
             pass
         else:
             return False, f"Unknown transaction type: {self.tx_type}"
@@ -180,6 +229,20 @@ class BlockHeader:
         self.vrf_proof = vrf_proof
         self.vrf_pub_key = vrf_pub_key
 
+    @classmethod
+    def from_dict(cls, data: dict):
+        """Creates a BlockHeader object from a dictionary."""
+        return cls(
+            parent_hash=bytes.fromhex(data["parent_hash"]),
+            state_root=bytes.fromhex(data["state_root"]),
+            transactions_root=bytes.fromhex(data["transactions_root"]),
+            height=data["height"],
+            timestamp=data["timestamp"],
+            producer_pubkey=bytes.fromhex(data["producer_pubkey"]),
+            vrf_proof=bytes.fromhex(data["vrf_proof"]),
+            vrf_pub_key=bytes.fromhex(data["vrf_pub_key"]),
+        )
+
     def to_dict(self):
         return {
             "parent_hash": self.parent_hash.hex(),
@@ -187,9 +250,9 @@ class BlockHeader:
             "transactions_root": self.transactions_root.hex(),
             "height": self.height,
             "timestamp": self.timestamp,
-            "producer_pubkey": self.producer_pubkey.hex(),
-            "vrf_proof": self.vrf_proof.hex(),
-            "vrf_pub_key": self.vrf_pub_key.hex(),
+            "producer_pubkey": self.producer_pubkey.hex() if self.producer_pubkey else None,
+            "vrf_proof": self.vrf_proof.hex() if self.vrf_proof else None,
+            "vrf_pub_key": self.vrf_pub_key.hex() if self.vrf_pub_key else None,
         }
 
     def calculate_hash(self) -> bytes:
@@ -308,11 +371,11 @@ class Block:
             "poh_sequence": [(h.hex(), e.hex() if e else None) for h, e in self.poh_sequence],
             "poh_initial": self.poh_initial.hex(),
             "height": self.height,
-            "producer_pubkey": self.producer_pubkey.hex(),
-            "vrf_proof": self.vrf_proof.hex(),
-            "vrf_pub_key": self.vrf_pub_key.hex(),
+            "producer_pubkey": self.producer_pubkey.hex() if self.producer_pubkey else None,
+            "vrf_proof": self.vrf_proof.hex() if self.vrf_proof else None,
+            "vrf_pub_key": self.vrf_pub_key.hex() if self.vrf_pub_key else None,
             "timestamp": self.timestamp,
-            "signature": self.signature.hex(),
+            "signature": self.signature.hex() if self.signature else None,
         }
 
     def get_signing_data(self) -> bytes:
@@ -328,13 +391,10 @@ class Block:
         if not self.signature:
             return False
         
-        # Re-calculate the header hash to ensure block contents haven't been tampered with
-        current_hash = self.header.calculate_hash()
-        
         return verify_signature(
             self.producer_pubkey,
             self.signature,
-            current_hash
+            self.get_signing_data()
         )
 
     @property

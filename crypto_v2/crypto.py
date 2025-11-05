@@ -58,8 +58,10 @@ def deserialize_public_key(pem_data: bytes) -> ec.EllipticCurvePublicKey:
     """Deserializes a public key from a PEM formatted byte string."""
     return serialization.load_pem_public_key(pem_data)
 
-def public_key_to_address(public_key_pem: str) -> bytes:
+def public_key_to_address(public_key_pem: bytes | str) -> bytes:
     """Derives a blockchain address from a public key PEM string."""
+    if isinstance(public_key_pem, str):
+        public_key_pem = public_key_pem.encode('utf-8')
     public_key = deserialize_public_key(public_key_pem)
     der_bytes = public_key.public_bytes(
         encoding=serialization.Encoding.DER,

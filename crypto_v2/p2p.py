@@ -136,10 +136,8 @@ class P2PNode:
         self.initial_peers = initial_peers or []
         self.max_peers = max_peers
         
-        # Create mempool with state validation
-        self.mempool = Mempool(
-            get_account_state=lambda addr: blockchain._get_account(addr, blockchain.state_trie)
-        )
+        # Mempool is now part of the blockchain instance
+        self.mempool = self.blockchain.mempool
         
         self.peers: dict[asyncio.StreamWriter, Peer] = {}
         self.banned_peers = set()  # {ip_address}
@@ -664,17 +662,17 @@ class P2PNode:
             
             self.seen_txs[tx.id] = time.time()
             
-            # Try to add to mempool
-            success, error = self.mempool.add_transaction(tx)
+            # Try to add to blockchain's mempool
+            success, error = self.blockchain._process_transaction(tx, self.blockchain.state_trie)
             
             if success:
-                logger.debug(f"Added new transaction {tx.id.hex()[:16]} from network")
+                logger.debug(f"Added new transaction {tx.id.hex()[:16]} to mempool")
                 # Rebroadcast to other peers
                 await self.broadcast(create_message(MSG_NEW_TX, data), exclude_peer=peer)
                 return True
             else:
-                logger.debug(f"Transaction rejected: {error}")
-                # Don't penalize peer for rejected transactions (might be duplicates)
+                logger.debug(f"Transaction rejected by mempool: {error}")
+                # Don't penalize peer for rejected transactions
                 return True
                 
         except Exception as e:

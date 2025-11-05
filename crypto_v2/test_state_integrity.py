@@ -42,7 +42,7 @@ def blockchain():
     # Store the block and set it as head
     import msgpack
     block_data = msgpack.packb(genesis.to_dict(), use_bin_type=True)
-    db.put(genesis.hash, block_data)
+    db.put(b'block:' + genesis.hash, block_data)
     db.put(b'height:0', genesis.hash)
     db.put(b'head', genesis.hash)
 

@@ -1,5 +1,0 @@
-# prometheus.yml
-scrape_configs:
-  - job_name: 'gamefi-node'
-    static_configs:
-      - targets: ['node1:9090', 'node2:9090']
