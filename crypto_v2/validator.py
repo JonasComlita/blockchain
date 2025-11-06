@@ -42,6 +42,7 @@ class ValidatorNode:
         self.validator_public_key_pem = serialize_public_key(validator_public_key)
         self.validator_address = public_key_to_address(self.validator_public_key_pem)
         self.vrf_private_key = vrf_private_key
+        self.vrf_public_key = vrf_private_key.verify_key 
         self.config = config
         
         self.is_running = False
@@ -131,7 +132,7 @@ class ValidatorNode:
                 height=latest_block.height + 1,
                 producer_pubkey=self.validator_public_key_pem,
                 vrf_proof=vrf_proof,
-                vrf_pub_key=self.p2p_node.vrf_public_key.encode(),
+                vrf_pub_key=bytes(self.vrf_public_key.verify_key),
                 timestamp=time.time()
             )
             

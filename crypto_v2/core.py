@@ -33,7 +33,6 @@ class Transaction:
                  timestamp: Optional[float] = None,
                  chain_id: Optional[int] = 1,
                  gas_limit: Optional[int] = 1_000_000):  # Replay protection
-        self.gas_limit = gas_limit
         self.sender_public_key = sender_public_key
         self.tx_type = tx_type
         self.data = data
@@ -42,6 +41,7 @@ class Transaction:
         self.timestamp = timestamp or time.time()
         self.signature = signature
         self.chain_id = chain_id
+        self.gas_limit = gas_limit
 
     @classmethod
     def from_dict(cls, data: dict):
@@ -67,6 +67,7 @@ class Transaction:
             "fee": self.fee,
             "timestamp": self.timestamp,
             "chain_id": self.chain_id,
+            "gas_limit": self.gas_limit,
         }
         if include_signature and self.signature:
             data["signature"] = self.signature

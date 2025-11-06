@@ -154,7 +154,6 @@ class P2PNode:
         
         # PoH and Block Production
         self.poh_generator = PoHGenerator(self.blockchain.get_latest_block().hash)
-        self.block_producer = BlockProducer(self.blockchain, self.mempool, self.poh_generator, self.key_pair)
         
         # DHT for peer discovery – mocked in unit tests
         self.dht = mock.Mock()
@@ -792,7 +791,6 @@ class P2PNode:
 
         # Start PoH and Block Production
         self.poh_generator.start()
-        self.block_producer.start()
 
         try:
             async with server:
@@ -809,9 +807,8 @@ class P2PNode:
         for task in self.tasks:
             task.cancel()
         
-        # Stop PoH and Block Production
+        # Stop PoH
         self.poh_generator.stop()
-        self.block_producer.stop()
         self.poh_generator.join()
         self.block_producer.join()
         

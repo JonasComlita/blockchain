@@ -30,6 +30,7 @@ class ChainConfig:
     min_stake_amount: int = 100
     slash_percentage: int = 50
     block_time: int = 10  # Target seconds between blocks
+    epoch_length: int = 50
 
 
 @dataclass

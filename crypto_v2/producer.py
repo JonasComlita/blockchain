@@ -12,50 +12,55 @@ class BlockProducer(threading.Thread):
         self.blockchain = blockchain
         self.mempool = mempool
         self.poh_generator = poh_generator
-        self.key_pair = key_pair
+        
+        # Normalize key_pair access
+        if isinstance(key_pair, dict):
+            self.private_key = key_pair.get('priv_key')
+            self.public_key = key_pair.get('pub_key')
+            self.vrf_priv_key = key_pair.get('vrf_priv_key')
+            self.vrf_pub_key = key_pair.get('vrf_pub_key')
+        else:
+            raise ValueError("key_pair must be a dict with priv_key, pub_key, vrf_priv_key, vrf_pub_key")
+        
         self.running = False
 
     def run(self):
         self.running = True
         while self.running:
-            time.sleep(1)  # Wait for a short time before trying to produce a block
+            time.sleep(1)
             
             latest_block = self.blockchain.get_latest_block()
             leader = self.blockchain.leader_scheduler.get_leader(latest_block.hash)
             
-            pub_key_pem = serialize_public_key(self.key_pair['pub_key'])
+            pub_key_pem = serialize_public_key(self.public_key)
             my_address = public_key_to_address(pub_key_pem).hex()
 
             if leader == my_address:
-                # It's our turn to produce a block
+                # Produce block
                 transactions = self.mempool.get_pending_transactions()
                 
-                # Record the transactions in the PoH sequence
                 for tx in transactions:
                     self.poh_generator.record_event(tx.id)
                 
                 poh_sequence, _ = self.poh_generator.get_proof()
                 
                 # Generate VRF proof
-                vrf_proof, _ = vrf_prove(self.key_pair['vrf_priv_key'], latest_block.hash)
+                vrf_proof, _ = vrf_prove(self.vrf_priv_key, latest_block.hash)
                 
-                # Create the new block
                 new_block = Block(
                     parent_hash=latest_block.hash,
-                    state_root=b'',  # This will be calculated by the blockchain
+                    state_root=b'',  # Will be calculated by blockchain
                     transactions=transactions,
                     poh_sequence=poh_sequence[1:],
                     poh_initial=poh_sequence[0][0],
                     height=latest_block.height + 1,
                     producer_pubkey=pub_key_pem,
                     vrf_proof=vrf_proof,
-                    vrf_pub_key=self.key_pair['vrf_pub_key'],
+                    vrf_pub_key=bytes(self.vrf_pub_key),  # ← FIX: Convert to bytes
                 )
                 
-                # Sign the block
-                new_block.sign_block(self.key_pair['priv_key'])
+                new_block.sign_block(self.private_key)
                 
-                # Add the block to the blockchain
                 if self.blockchain.add_block(new_block):
                     print(f"Produced block {new_block.height}")
                 else:

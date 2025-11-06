@@ -77,6 +77,10 @@ def sign(private_key: ec.EllipticCurvePrivateKey, data: bytes) -> bytes:
 def verify_signature(public_key_pem: str, signature: bytes, data: bytes) -> bool:
     """Verifies an ECDSA/SHA256 signature."""
     try:
+        # Handle both string and bytes input
+        if isinstance(public_key_pem, str):
+            public_key_pem = public_key_pem.encode('utf-8')
+            
         public_key = deserialize_public_key(public_key_pem)
         public_key.verify(signature, data, ec.ECDSA(hashes.SHA256()))
         return True

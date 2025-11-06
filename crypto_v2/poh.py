@@ -65,14 +65,32 @@ class PoHRecorder:
 
 
 def verify_poh_sequence(initial_hash: bytes, sequence: list) -> bool:
-    if not sequence or sequence[0][0] != initial_hash:
+    """Verify a PoH sequence starting from initial_hash."""
+    if not sequence:
         return False
-
+    
+    # The sequence should start with a tick/event after initial_hash
+    # Verify the first entry connects to initial_hash
+    first_entry = sequence[0]
+    first_hash, first_event = first_entry
+    
+    if first_event:
+        expected_first = generate_hash(initial_hash + first_event)
+    else:
+        expected_first = generate_hash(initial_hash)
+    
+    if expected_first != first_hash:
+        return False
+    
+    # Verify rest of sequence
+    if len(sequence) == 1:
+        return True
+    
     with ThreadPoolExecutor() as executor:
         results = list(executor.map(
             verify_entry,
             [s[0] for s in sequence[:-1]],
             sequence[1:]
         ))
-
+    
     return all(results)
