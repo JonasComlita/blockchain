@@ -102,9 +102,11 @@ MAX_TXS_PER_BLOCK = 1000
 MIN_STAKE_AMOUNT = 100 * TOKEN_UNIT
 SLASH_PERCENTAGE = 50
 
-# Bonding Curve constants
-BONDING_CURVE_BASE_PRICE = Decimal('0.10')
-BONDING_CURVE_SLOPE = Decimal('0.00000001')
+# AMM constants
+AMM_MINT_PREMIUM = Decimal('1.02')  # 2% above market price
+MIN_MINT_PRICE = Decimal('0.10')    # Never mint below $0.10/token
+MAX_MINT_PRICE = Decimal('10.00')   # Never mint above $10.00/token
+MIN_BURN_PRICE = Decimal('0.05')    # Never buy back below $0.05/token
 
 # Casper FFG Finality Constants
 EPOCH_LENGTH = 50
@@ -1092,8 +1094,8 @@ class Blockchain:
 
         sender_account["balances"]["native"] -= ORACLE_BOND
         
-        oracle_id = generate_hash(tx.sender_public_key)[:16].hex()
-        self.oracle_pubkey_to_id[tx.sender_public_key] = oracle_id
+        oracle_id = generate_hash(tx.sender_public_key_bytes)[:16].hex()
+        self.oracle_pubkey_to_id[tx.sender_public_key_bytes] = oracle_id
         self.oracle_stakes[oracle_id] = ORACLE_BOND
 
         gas.charge(GasMetering.STORAGE_WRITE, "write_oracle_stakes")
@@ -1105,7 +1107,7 @@ class Blockchain:
         """Request to unregister oracle (starts time-lock)."""
         gas.charge(GasMetering.COMPUTATION * 3, "oracle_unregister_request")
         
-        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key)
+        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key_bytes)
         if not oracle_id:
             raise ValidationError("Not a registered oracle")
         
@@ -1129,7 +1131,7 @@ class Blockchain:
         """Execute oracle unregistration after time-lock expires."""
         gas.charge(GasMetering.COMPUTATION * 5, "oracle_unregister_execute")
         
-        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key)
+        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key_bytes)
         if not oracle_id:
             raise ValidationError("Not a registered oracle")
         
@@ -1150,15 +1152,14 @@ class Blockchain:
                 f"Time-lock not expired. Must wait {remaining} more seconds."
             )
         
-        if tx.sender_public_key not in self.oracle_stakes:
+        if tx.sender_public_key_bytes not in self.oracle_stakes:
             raise ValidationError("Oracle not found in stakes")
-        
-        stake_amount = self.oracle_stakes[tx.sender_public_key]
-        
+
+        stake_amount = self.oracle_stakes[tx.sender_public_key_bytes]
         sender_account["balances"]["native"] += stake_amount
-        
-        del self.oracle_stakes[tx.sender_public_key]
-        del self.oracle_pubkey_to_id[tx.sender_public_key]
+
+        del self.oracle_stakes[tx.sender_public_key_bytes]
+        del self.oracle_pubkey_to_id[tx.sender_public_key_bytes]
         del unstake_requests[oracle_id]
         
         gas.charge(GasMetering.STORAGE_WRITE * 2, "write_oracle_and_unstake_state")
@@ -1185,22 +1186,22 @@ class Blockchain:
         signature = bytes.fromhex(tx.data["signature"])
         round_id = tx.data["round_id"]
 
-        if not verify_signature(tx.sender_public_key, signature,
-                                json.dumps(payload, sort_keys=True).encode()):
+        if not verify_signature(tx.sender_public_key_bytes, signature,
+                json.dumps(payload, sort_keys=True).encode()):
             raise ValidationError("Invalid oracle signature")
 
-        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key)
+        oracle_id = self.oracle_pubkey_to_id.get(tx.sender_public_key_bytes)
         if not oracle_id:
             raise ValidationError("Oracle not registered")
         if oracle_id not in self.oracle_stakes:
             raise ValidationError("Oracle not bonded")
-    
+
         gas.charge(GasMetering.STORAGE_READ, "read_oracle_round")
         round_obj = self._get_oracle_round(round_id, trie)
         
         if oracle_id in round_obj.submissions:
             raise ValidationError("Duplicate submission")
- 
+
         round_obj.submissions[oracle_id] = payload
         gas.charge(GasMetering.STORAGE_WRITE, "write_oracle_round")
         self._set_oracle_round(round_id, round_obj, trie)
@@ -1315,7 +1316,7 @@ class Blockchain:
         gas = GasMetering(tx.gas_limit if hasattr(tx, 'gas_limit') else 1_000_000)
         gas.charge(GasMetering.BASE_TX_COST, "base_transaction")
         
-        sender_address = public_key_to_address(tx.sender_public_key)
+        sender_address = public_key_to_address(tx.sender_public_key_bytes)
         
         # Charge for account read
         gas.charge(GasMetering.STORAGE_READ, "read_sender_account")
@@ -1650,29 +1651,39 @@ class Blockchain:
         sender_account['balances']['native'] += amount
 
     def _process_bond_mint(self, tx: Transaction, trie: Trie,
-                           sender_address: bytes, sender_account: dict, gas: GasMetering):
-        """Process bond mint via bonding curve."""
+                       sender_address: bytes, sender_account: dict, gas: GasMetering):
+        """
+        Process bond mint using AMM-referenced pricing.
+        Mints tokens at current market price + premium.
+        """
         gas.charge(GasMetering.COMPUTATION * 5, "bond_mint_processing")
         
-        gas.charge(GasMetering.STORAGE_READ, "read_tokenomics")
-        tokenomics_state = self._get_tokenomics_state(trie)
         usd_amount_in = tx.data['amount_in']
-
+        
         if sender_account['balances']['usd'] < usd_amount_in:
             raise ValidationError("Insufficient USD balance for bond mint.")
-
+        
+        # Get current AMM price as reference
+        gas.charge(GasMetering.STORAGE_READ, "read_pool")
+        pool = self._get_liquidity_pool_state(trie)
+        
+        if pool.token_reserve == 0 or pool.usd_reserve == 0:
+            # Bootstrap price: $1.00 per token
+            price_per_token = Decimal('1.0')
+        else:
+            # Use AMM price with premium (incentivizes AMM swaps over minting)
+            market_price = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+            price_per_token = market_price * AMM_MINT_PREMIUM
+        
+        # Apply price bounds
+        price_per_token = max(MIN_MINT_PRICE, min(price_per_token, MAX_MINT_PRICE))
+        
         # Calculate tokens to mint
-        price_per_token = BONDING_CURVE_BASE_PRICE + \
-                          (BONDING_CURVE_SLOPE * Decimal(tokenomics_state.total_supply))
-        
-        if price_per_token == 0:
-            raise ValidationError("Invalid price calculation")
-        
         native_tokens_out = int(Decimal(usd_amount_in) / price_per_token)
         
         if native_tokens_out == 0:
             raise ValidationError("Bond amount too small")
-
+        
         # Transfer USD to reserve
         sender_account['balances']['usd'] -= usd_amount_in
         gas.charge(GasMetering.STORAGE_READ, "read_reserve")
@@ -1680,37 +1691,42 @@ class Blockchain:
         reserve_pool_account['balances']['usd'] += usd_amount_in
         gas.charge(GasMetering.STORAGE_WRITE, "write_reserve")
         self._set_account(RESERVE_POOL_ADDRESS, reserve_pool_account, trie)
-
-        # Treasury logic
+        
+        # Try to fulfill from treasury first (recycled tokens)
         gas.charge(GasMetering.STORAGE_READ, "read_treasury")
         treasury_account = self._get_account(TREASURY_ADDRESS, trie)
         treasury_balance = treasury_account['balances'].get('native', 0)
         tokens_from_treasury = min(native_tokens_out, treasury_balance)
         tokens_to_mint = native_tokens_out - tokens_from_treasury
-
+        
         if tokens_from_treasury > 0:
             treasury_account['balances']['native'] -= tokens_from_treasury
             sender_account['balances']['native'] += tokens_from_treasury
             gas.charge(GasMetering.STORAGE_WRITE, "write_treasury")
             self._set_account(TREASURY_ADDRESS, treasury_account, trie)
-
-        if tokens_to_mint > 0:
-            tokenomics_state.total_supply += tokens_to_mint
-            sender_account['balances']['native'] += tokens_to_mint
         
-        gas.charge(GasMetering.STORAGE_WRITE, "write_tokenomics")
-        self._set_tokenomics_state(tokenomics_state, trie)
+        # Mint new tokens if needed
+        if tokens_to_mint > 0:
+            gas.charge(GasMetering.STORAGE_READ, "read_tokenomics")
+            tokenomics_state = self._get_tokenomics_state(trie)
+            tokenomics_state.total_supply += tokens_to_mint
+            tokenomics_state.total_minted += tokens_to_mint
+            sender_account['balances']['native'] += tokens_to_mint
+            gas.charge(GasMetering.STORAGE_WRITE, "write_tokenomics")
+            self._set_tokenomics_state(tokenomics_state, trie)
 
     def _process_reserve_burn(self, tx: Transaction, trie: Trie,
-                              sender_address: bytes, sender_account: dict, gas: GasMetering):
-        """Process reserve burn (buyback & burn)."""
+                          sender_address: bytes, sender_account: dict, gas: GasMetering):
+        """
+        Process reserve burn (buyback & burn) with price floor protection.
+        """
         gas.charge(GasMetering.COMPUTATION * 5, "reserve_burn_processing")
         
         native_amount_in = tx.data['amount_in']
-
+        
         if sender_account['balances']['native'] < native_amount_in:
             raise ValidationError("Insufficient native token balance for reserve burn.")
-
+        
         gas.charge(GasMetering.STORAGE_READ, "read_outflow_reserve")
         outflow_reserve_account = self._get_account(OUTFLOW_RESERVE_ADDRESS, trie)
         usd_balance = outflow_reserve_account['balances']['usd']
@@ -1722,24 +1738,27 @@ class Blockchain:
             raise ValidationError("Cannot determine price: empty token reserve")
         
         market_price = Decimal(pool.usd_reserve) / Decimal(pool.token_reserve)
+        
+        # Apply 2% discount for buyback and price floor
         buyback_price = market_price * Decimal('0.98')
+        buyback_price = max(buyback_price, MIN_BURN_PRICE)
         
         usd_tokens_out = int(Decimal(native_amount_in) * buyback_price)
         
         if usd_tokens_out == 0:
             raise ValidationError("Burn amount too small")
-
+        
         if usd_balance < usd_tokens_out:
             raise ValidationError("Outflow Reserve has insufficient USD liquidity.")
-
+        
         # Perform swap
         sender_account['balances']['native'] -= native_amount_in
         sender_account['balances']['usd'] += usd_tokens_out
         outflow_reserve_account['balances']['usd'] -= usd_tokens_out
         gas.charge(GasMetering.STORAGE_WRITE, "write_outflow_reserve")
         self._set_account(OUTFLOW_RESERVE_ADDRESS, outflow_reserve_account, trie)
-
-        # Burn
+        
+        # Burn tokens
         gas.charge(GasMetering.STORAGE_READ, "read_tokenomics")
         tokenomics_state = self._get_tokenomics_state(trie)
         tokenomics_state.total_supply -= native_amount_in

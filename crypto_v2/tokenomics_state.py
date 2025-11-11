@@ -33,6 +33,7 @@ class TokenomicsState:
         self.total_supply = int(data.get('total_supply', 0))
         self.total_usd_in = Decimal(data['total_usd_in'])
         self.total_usd_out = Decimal(data['total_usd_out'])
+        self._validate()
     
     def to_dict(self) -> dict:
         """
@@ -48,16 +49,9 @@ class TokenomicsState:
     
     @property
     def circulating_supply(self) -> int:
-        """
-        Calculate circulating supply in the smallest unit.
-        
-        Formula: Total Minted - Total Burned
-        
-        Note: This doesn't account for tokens locked in AMM pool,
-        which is intentional - those are still "in circulation"
-        from an economic perspective.
-        """
-        return self.total_minted - self.total_burned
+        """Calculate circulating supply (always non-negative)."""
+        supply = self.total_minted - self.total_burned
+        return max(0, supply)  # Defensive: never return negative
     
     @property
     def net_usd_flow(self) -> Decimal:
@@ -84,3 +78,18 @@ class TokenomicsState:
             f"circulating={supply_tokens} tokens, "
             f"net_usd_flow=${self.net_usd_flow})"
         )
+    
+    def _validate(self):
+        """Ensure state consistency."""
+        # Supply should equal minted - burned
+        expected_supply = self.total_minted - self.total_burned
+        if self.total_supply != expected_supply:
+            # Auto-correct if mismatch
+            self.total_supply = expected_supply
+        
+        # Ensure non-negative values
+        if self.total_minted < 0 or self.total_burned < 0:
+            raise ValueError("Minted/burned cannot be negative")
+        
+        if self.total_usd_in < 0 or self.total_usd_out < 0:
+            raise ValueError("USD flows cannot be negative")

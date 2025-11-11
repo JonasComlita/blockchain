@@ -24,7 +24,7 @@ SLASH = "SLASH"
 
 class Transaction:
     def __init__(self,
-                 sender_public_key: str,
+                 sender_public_key: bytes,
                  tx_type: str,
                  data: dict,
                  nonce: int,
@@ -47,7 +47,7 @@ class Transaction:
     def from_dict(cls, data: dict):
         """Creates a Transaction object from a dictionary."""
         return cls(
-            sender_public_key=data["sender_public_key"],
+            sender_public_key=bytes.fromhex(data["sender_public_key"]),
             tx_type=data["tx_type"],
             data=data["data"],
             nonce=data["nonce"],
@@ -60,7 +60,7 @@ class Transaction:
 
     def to_dict(self, include_signature=True):
         data = {
-            "sender_public_key": self.sender_public_key,
+            "sender_public_key": self.sender_public_key.hex(),
             "tx_type": self.tx_type,
             "data": self.data,
             "nonce": self.nonce,
@@ -208,6 +208,13 @@ class Transaction:
             return False, f"Unknown transaction type: {self.tx_type}"
         
         return True, ""
+    
+    @property
+    def sender_public_key_bytes(self) -> bytes:
+        """Get sender public key as bytes."""
+        if isinstance(self.sender_public_key, str):
+            return bytes.fromhex(self.sender_public_key)
+        return self.sender_public_key
 
 
 class BlockHeader:
